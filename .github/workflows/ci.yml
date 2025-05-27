@@ -1,0 +1,99 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Run tests
+      run: cargo test --verbose
+
+    - name: Build project
+      run: cargo build --release --verbose
+
+    - name: Test executable
+      run: |
+        Write-Host "Testing chloride executable..."
+        $version = & "target\release\chloride.exe" --version
+        Write-Host "Version: $version"
+        
+        $help = & "target\release\chloride.exe" --help
+        if ($help) {
+          Write-Host "✅ Help command works"
+        } else {
+          Write-Host "❌ Help command failed"
+          exit 1
+        }
+      shell: pwsh
+
+  check-dependencies:
+    name: Check Dependencies
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+
+    - name: Run security audit
+      run: cargo audit
+
+    - name: Check for outdated dependencies
+      run: |
+        cargo install cargo-outdated
+        cargo outdated
+
+  build-docs:
+    name: Build Documentation
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build documentation
+      run: cargo doc --no-deps --document-private-items

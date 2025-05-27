@@ -1,0 +1,301 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ created ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+    
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
+    - name: Run tests
+      run: cargo test --verbose
+    
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+    
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+
+  build-installer:
+    name: Build Installer
+    runs-on: windows-latest
+    needs: test
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+    
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
+    - name: Install WiX Toolset
+      run: |
+        Write-Host "Installing WiX Toolset..."
+        winget install --id WiXToolset.WiX --silent --accept-package-agreements --accept-source-agreements
+        
+        # Wait for installation to complete and verify
+        Start-Sleep -Seconds 10
+        
+        # Add WiX to PATH for current session
+        $wixPath = Get-ChildItem -Path "${env:ProgramFiles}\WiX*" -Directory | Select-Object -First 1
+        if ($wixPath) {
+          $wixBinPath = Join-Path $wixPath.FullName "bin"
+          if (Test-Path $wixBinPath) {
+            $env:PATH = "$wixBinPath;$env:PATH"
+            Write-Host "Added WiX to PATH: $wixBinPath"
+          }
+        }
+        
+        # Verify WiX installation
+        try {
+          $version = & wix.exe --version
+          Write-Host "WiX installed successfully: $version"
+        } catch {
+          Write-Host "WiX installation verification failed, trying alternative paths..."
+          # Check alternative installation paths
+          $altPaths = @(
+            "${env:ProgramFiles}\WiX Toolset v6.0\bin",
+            "${env:ProgramFiles(x86)}\WiX Toolset v6.0\bin",
+            "${env:ProgramFiles}\WiX Toolset v4\bin",
+            "${env:ProgramFiles(x86)}\WiX Toolset v4\bin"
+          )
+          foreach ($path in $altPaths) {
+            if (Test-Path (Join-Path $path "wix.exe")) {
+              $env:PATH = "$path;$env:PATH"
+              Write-Host "Found WiX at: $path"
+              $version = & wix.exe --version
+              Write-Host "WiX version: $version"
+              break
+            }
+          }
+        }
+      shell: pwsh
+    
+    - name: Build Rust project
+      run: cargo build --release --verbose
+    
+    - name: Verify executable
+      run: |
+        if (Test-Path "target\release\chloride.exe") {
+          Write-Host "✅ Chloride executable built successfully"
+          $version = & "target\release\chloride.exe" --version
+          Write-Host "Version: $version"
+        } else {
+          Write-Host "❌ Chloride executable not found"
+          exit 1
+        }
+      shell: pwsh
+    
+    - name: Run installer diagnostic
+      run: |
+        Write-Host "Running WiX diagnostic..."
+        cd installer
+        powershell -ExecutionPolicy Bypass -File test-wix.ps1 -Verbose
+      shell: pwsh
+    
+    - name: Build MSI installer
+      run: |
+        Write-Host "Building MSI installer..."
+        cd installer
+        powershell -ExecutionPolicy Bypass -File build-installer.ps1
+        
+        if (Test-Path "chloride.msi") {
+          $size = (Get-Item "chloride.msi").Length
+          Write-Host "✅ MSI installer created successfully"
+          Write-Host "Size: $([math]::Round($size/1KB, 2)) KB"
+        } else {
+          Write-Host "❌ MSI installer not found"
+          exit 1
+        }
+      shell: pwsh
+    
+    - name: Test installer (dry run)
+      run: |
+        cd installer
+        Write-Host "Testing installer with dry run..."
+        msiexec /a "chloride.msi" /qn TARGETDIR="$PWD\test_install"
+        
+        if (Test-Path "test_install\chloride.exe") {
+          Write-Host "✅ Installer test successful"
+        } else {
+          Write-Host "❌ Installer test failed"
+          exit 1
+        }
+      shell: pwsh
+    
+    - name: Upload installer artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: chloride-installer
+        path: installer/chloride.msi
+        retention-days: 30
+    
+    - name: Upload executable artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: chloride-executable
+        path: target/release/chloride.exe
+        retention-days: 30
+
+  release:
+    name: Create Release
+    runs-on: windows-latest
+    needs: build-installer
+    if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download installer artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: chloride-installer
+        path: ./artifacts
+    
+    - name: Download executable artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: chloride-executable
+        path: ./artifacts
+    
+    - name: Get version from tag
+      id: get_version
+      run: |
+        if ("${{ github.ref }}" -match "refs/tags/v(.+)") {
+          $version = $matches[1]
+        } elseif ("${{ github.event.release.tag_name }}") {
+          $version = "${{ github.event.release.tag_name }}".TrimStart('v')
+        } else {
+          $version = "0.1.0"
+        }
+        Write-Host "Version: $version"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+    
+    - name: Rename artifacts with version
+      run: |
+        $version = "${{ steps.get_version.outputs.version }}"
+        
+        # Rename MSI installer
+        if (Test-Path "artifacts\chloride.msi") {
+          Move-Item "artifacts\chloride.msi" "artifacts\chloride-$version-installer.msi"
+          Write-Host "Renamed MSI to: chloride-$version-installer.msi"
+        }
+        
+        # Rename executable
+        if (Test-Path "artifacts\chloride.exe") {
+          Move-Item "artifacts\chloride.exe" "artifacts\chloride-$version-windows-x64.exe"
+          Write-Host "Renamed EXE to: chloride-$version-windows-x64.exe"
+        }
+        
+        # List all artifacts
+        Write-Host "Final artifacts:"
+        Get-ChildItem "artifacts" | ForEach-Object { Write-Host "  $($_.Name)" }
+      shell: pwsh
+    
+    - name: Create Release
+      if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/chloride-${{ steps.get_version.outputs.version }}-installer.msi
+          artifacts/chloride-${{ steps.get_version.outputs.version }}-windows-x64.exe
+        name: Chloride v${{ steps.get_version.outputs.version }}
+        body: |
+          ## Chloride v${{ steps.get_version.outputs.version }}
+          
+          ### 📦 Downloads
+          
+          - **Windows Installer (Recommended)**: `chloride-${{ steps.get_version.outputs.version }}-installer.msi`
+            - Installs Chloride to your system PATH
+            - Provides both `chloride` and `cl` commands
+            - Easy uninstall via Windows Programs & Features
+          
+          - **Portable Executable**: `chloride-${{ steps.get_version.outputs.version }}-windows-x64.exe`
+            - No installation required
+            - Rename to `chloride.exe` and add to your PATH manually
+          
+          ### 🚀 Installation
+          
+          **Option 1: MSI Installer (Recommended)**
+          1. Download `chloride-${{ steps.get_version.outputs.version }}-installer.msi`
+          2. Run the installer and follow the wizard
+          3. Restart your terminal
+          4. Use `chloride` or `cl` commands from anywhere
+          
+          **Option 2: Portable**
+          1. Download `chloride-${{ steps.get_version.outputs.version }}-windows-x64.exe`
+          2. Rename to `chloride.exe`
+          3. Place in a directory in your PATH
+          
+          ### 📋 Usage
+          
+          ```cmd
+          # Create a file
+          chloride touch myfile.txt
+          cl touch myfile.txt
+          
+          # Remove a file
+          chloride rm oldfile.txt
+          cl rm oldfile.txt
+          
+          # Show help
+          chloride --help
+          ```
+          
+          ### 🐛 Issues
+          
+          If you encounter any issues, please report them on our [GitHub Issues](https://github.com/chloride-team/chloride/issues) page.
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Upload to existing release
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/chloride-${{ steps.get_version.outputs.version }}-installer.msi
+          artifacts/chloride-${{ steps.get_version.outputs.version }}-windows-x64.exe
+        tag_name: ${{ github.event.release.tag_name }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

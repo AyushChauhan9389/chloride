@@ -1,0 +1,197 @@
+name: Test Installer Build
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'installer/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-installer-build:
+    name: Test Installer Build
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+    
+    - name: Cache cargo dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
+    - name: Install WiX Toolset
+      run: |
+        Write-Host "Installing WiX Toolset for testing..."
+        winget install --id WiXToolset.WiX --silent --accept-package-agreements --accept-source-agreements
+        
+        # Wait for installation
+        Start-Sleep -Seconds 10
+        
+        # Find and add WiX to PATH
+        $wixPaths = @(
+          "${env:ProgramFiles}\WiX Toolset v6.0\bin",
+          "${env:ProgramFiles(x86)}\WiX Toolset v6.0\bin",
+          "${env:ProgramFiles}\WiX Toolset v4\bin",
+          "${env:ProgramFiles(x86)}\WiX Toolset v4\bin"
+        )
+        
+        foreach ($path in $wixPaths) {
+          if (Test-Path (Join-Path $path "wix.exe")) {
+            $env:PATH = "$path;$env:PATH"
+            Write-Host "Found WiX at: $path"
+            break
+          }
+        }
+        
+        # Verify installation
+        $version = & wix.exe --version
+        Write-Host "WiX version: $version"
+      shell: pwsh
+    
+    - name: Run Rust tests
+      run: cargo test --verbose
+    
+    - name: Build Rust project
+      run: cargo build --release --verbose
+    
+    - name: Verify executable works
+      run: |
+        Write-Host "Testing chloride executable..."
+        $output = & "target\release\chloride.exe" --version
+        Write-Host "Version output: $output"
+        
+        # Test help command
+        $help = & "target\release\chloride.exe" --help
+        Write-Host "Help command works: $($help -ne $null)"
+      shell: pwsh
+    
+    - name: Test WiX compatibility
+      run: |
+        Write-Host "Testing WiX compatibility..."
+        cd installer
+        powershell -ExecutionPolicy Bypass -File test-wix.ps1
+      shell: pwsh
+    
+    - name: Test installer build process
+      run: |
+        Write-Host "Testing installer build process..."
+        cd installer
+        
+        # Run the build script
+        powershell -ExecutionPolicy Bypass -File build-installer.ps1
+        
+        # Verify MSI was created
+        if (Test-Path "chloride.msi") {
+          $size = (Get-Item "chloride.msi").Length
+          Write-Host "✅ MSI created successfully - Size: $([math]::Round($size/1KB, 2)) KB"
+        } else {
+          Write-Host "❌ MSI not created"
+          exit 1
+        }
+      shell: pwsh
+    
+    - name: Test installer functionality
+      run: |
+        cd installer
+        Write-Host "Testing installer with administrative install..."
+        
+        # Create test directory
+        $testDir = "$PWD\test_install"
+        New-Item -ItemType Directory -Path $testDir -Force
+        
+        # Test installer extraction
+        msiexec /a "chloride.msi" /qn TARGETDIR="$testDir"
+        
+        # Wait for extraction to complete
+        Start-Sleep -Seconds 5
+        
+        # Verify extracted files
+        if (Test-Path "$testDir\chloride.exe") {
+          Write-Host "✅ Main executable extracted"
+        } else {
+          Write-Host "❌ Main executable not found"
+          exit 1
+        }
+        
+        if (Test-Path "$testDir\cl.exe") {
+          Write-Host "✅ Alias executable extracted"
+        } else {
+          Write-Host "❌ Alias executable not found"
+          exit 1
+        }
+        
+        # Test extracted executable
+        $version = & "$testDir\chloride.exe" --version
+        Write-Host "Extracted executable version: $version"
+        
+        # Cleanup
+        Remove-Item -Path $testDir -Recurse -Force
+      shell: pwsh
+    
+    - name: Validate installer metadata
+      run: |
+        cd installer
+        Write-Host "Validating installer metadata..."
+        
+        # Use PowerShell to read MSI properties
+        $windowsInstaller = New-Object -ComObject WindowsInstaller.Installer
+        $database = $windowsInstaller.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $windowsInstaller, @("$PWD\chloride.msi", 0))
+        
+        # Check some basic properties
+        $view = $database.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $database, @("SELECT * FROM Property"))
+        $view.GetType().InvokeMember("Execute", "InvokeMethod", $null, $view, $null)
+        
+        $properties = @{}
+        do {
+          $record = $view.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $view, $null)
+          if ($record) {
+            $prop = $record.GetType().InvokeMember("StringData", "GetProperty", $null, $record, 1)
+            $value = $record.GetType().InvokeMember("StringData", "GetProperty", $null, $record, 2)
+            $properties[$prop] = $value
+          }
+        } while ($record)
+        
+        # Validate key properties
+        if ($properties["ProductName"]) {
+          Write-Host "✅ Product Name: $($properties["ProductName"])"
+        }
+        if ($properties["ProductVersion"]) {
+          Write-Host "✅ Product Version: $($properties["ProductVersion"])"
+        }
+        if ($properties["Manufacturer"]) {
+          Write-Host "✅ Manufacturer: $($properties["Manufacturer"])"
+        }
+        
+        # Cleanup COM objects
+        $view.GetType().InvokeMember("Close", "InvokeMethod", $null, $view, $null)
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($view) | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($database) | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($windowsInstaller) | Out-Null
+      shell: pwsh
+    
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-installer-${{ github.event.pull_request.number }}
+        path: |
+          installer/chloride.msi
+          target/release/chloride.exe
+        retention-days: 7
