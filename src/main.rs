@@ -1,11 +1,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::fs::{File, remove_file};
-use std::path::Path;
 use std::io::{self, Write};
+use std::path::Path;
 
 #[derive(Parser)]
-#[command(name = "chloride", version = "0.1.0", about = "A simple file management tool")]
+#[command(
+    name = "chloride",
+    version = "0.1.0",
+    about = "A simple file management tool"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -27,7 +31,7 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
     match cli.command {
         Some(Commands::Touch { filename }) => {
             touch_file(&filename)?;
@@ -39,7 +43,7 @@ fn main() -> Result<()> {
             show_dashboard()?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -58,20 +62,23 @@ fn remove_file_cmd(filename: &str) -> Result<()> {
         println!("❌ File '{}' does not exist", filename);
         return Ok(());
     }
-    
-    print!("🗑️  Are you sure you want to delete '{}'? (y/N): ", filename);
+
+    print!(
+        "🗑️  Are you sure you want to delete '{}'? (y/N): ",
+        filename
+    );
     io::stdout().flush()?;
-    
+
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    
+
     if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
         remove_file(filename)?;
         println!("✅ Deleted file '{}'", filename);
     } else {
         println!("❌ Deletion cancelled");
     }
-    
+
     Ok(())
 }
 
@@ -97,6 +104,6 @@ fn show_dashboard() -> Result<()> {
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
     println!("💡 Tip: Run 'chloride --help' for more detailed information");
-    
+
     Ok(())
 }
