@@ -1,0 +1,6 @@
+# cfg.yaml
+commands:
+  - name: Update packages
+    run: sudo apt update && sudo apt upgrade -y
+  - name: Install Rust
+    run: curl https://sh.rustup.rs -sSf | sh -s -- -y

@@ -1,0 +1,11 @@
+[package]
+name = "chloride"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.38", features = ["derive","cargo"] }
+anyhow = "1.0.98"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_yaml = "0.9.34"
+tokio = { version = "1.45.1", features = ["full"] }
