@@ -196,7 +196,7 @@ chloride/
 
 - All PRs must pass CI checks
 - Installer builds are tested automatically
-- Use semantic versioning for releases
+- Use semantic version for releases
 - Update CHANGELOG.md for notable changes
 
 ## Compatibility
