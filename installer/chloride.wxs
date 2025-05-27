@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Chloride File Manager" 
+           Language="1033" 
+           Version="0.1.0" 
+           Manufacturer="Chloride Team" 
+           UpgradeCode="12345678-1234-1234-1234-123456789012">
+
+    <SummaryInformation Description="Chloride - A simple file management tool" 
+                        Comments="Install Chloride file management CLI tool" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Chloride is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="ProductFeature" Title="Chloride File Manager" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="EnvironmentPath" />
+    </Feature>
+
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="Chloride">
+        <Component Id="ChlorideExecutable" Guid="11111111-1111-1111-1111-111111111111">
+          <File Id="ChlorideExe" 
+                Source="..\target\release\chloride.exe" 
+                KeyPath="yes" />
+          <File Id="ChlorideCl" 
+                Source="..\target\release\chloride.exe" 
+                Name="cl.exe" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    
+    <Component Id="EnvironmentPath" Guid="87654321-4321-4321-4321-210987654321" Directory="INSTALLFOLDER">
+      <Environment Id="PATH" 
+                   Name="PATH" 
+                   Value="[INSTALLFOLDER]" 
+                   Permanent="no" 
+                   Part="last" 
+                   Action="set" 
+                   System="yes" />
+      <RegistryValue Root="HKCU" 
+                     Key="Software\ChlorideTeam\Chloride" 
+                     Name="PathAdded" 
+                     Value="1" 
+                     Type="integer" 
+                     KeyPath="yes" />
+    </Component>
+
+    <ComponentGroup Id="ProductComponents">
+      <ComponentRef Id="ChlorideExecutable" />
+    </ComponentGroup>
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    
+    <!-- Add some useful properties -->
+    <Property Id="ARPPRODUCTICON" Value="ChlorideIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/chloride-team/chloride" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/chloride-team/chloride" />
+    <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+    
+  </Package>
+</Wix>
