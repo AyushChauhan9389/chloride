@@ -159,14 +159,14 @@ jobs:
       shell: pwsh
     
     - name: Upload installer artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: chloride-installer
         path: installer/chloride.msi
         retention-days: 30
     
     - name: Upload executable artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: chloride-executable
         path: target/release/chloride.exe
