@@ -1,0 +1,23 @@
+/target/
+/dist/
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local environment/config
+.env
+.env.*
+!.env.example
+
+# Windows installer outputs
+*.exe
+*.msi
+*.msix
+*.appx
+*.log
+
+# Keep checked-in NSIS installer script, ignore generated installer artifacts
+!installer/**/*.nsi
