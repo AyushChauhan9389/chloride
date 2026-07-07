@@ -43,6 +43,9 @@ fn on_key(app: &mut App, key: KeyEvent) {
         Mode::Input { kind, buffer } => on_input_key(app, key.code, kind, buffer),
         Mode::Confirm { name, is_dir } => on_confirm_key(app, key.code, name, is_dir),
         Mode::ConfirmRemoteDelete { id, name } => on_confirm_remote_delete_key(app, key.code, id, name),
+        Mode::Message { .. } => {
+            // Any key dismisses the message popup.
+        }
         Mode::Auth(form) => on_auth_key(app, key.code, form),
         Mode::Quota(_) => {
             // Any key dismisses the quota overlay.

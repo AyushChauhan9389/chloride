@@ -19,6 +19,7 @@ pub enum Mode {
     Input { kind: InputKind, buffer: String },
     Confirm { name: String, is_dir: bool },
     ConfirmRemoteDelete { id: i64, name: String },
+    Message { title: String, text: String },
     Auth(AuthForm),
     Quota(Option<Result<crate::api::StorageInfo, String>>),
 }
@@ -331,7 +332,12 @@ impl App {
 
         match copy_to_clipboard(&url) {
             Ok(()) => self.set_success("Copied short download URL"),
-            Err(e) => self.set_error(format!("Failed to copy URL: {e}")),
+            Err(_) => {
+                self.mode = Mode::Message {
+                    title: " Short Download URL ".into(),
+                    text: url,
+                };
+            }
         }
     }
 
@@ -528,12 +534,19 @@ fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new("clip").stdin(Stdio::piped()).spawn()?;
+    let mut child = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Set-Clipboard"])
+        .stdin(Stdio::piped())
+        .spawn()?;
     if let Some(stdin) = child.stdin.as_mut() {
         stdin.write_all(text.as_bytes())?;
     }
-    child.wait()?;
-    Ok(())
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Set-Clipboard failed"))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -554,17 +567,39 @@ fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let program = if Command::new("wl-copy").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() {
-        "wl-copy"
-    } else {
-        "xclip"
+    let has_command = |name: &str| {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     };
-    let mut child = Command::new(program).args(["-selection", "clipboard"]).stdin(Stdio::piped()).spawn()?;
+
+    let mut command = if has_command("wl-copy") {
+        Command::new("wl-copy")
+    } else if has_command("xclip") {
+        let mut command = Command::new("xclip");
+        command.args(["-selection", "clipboard"]);
+        command
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "install wl-copy or xclip to copy to clipboard",
+        ));
+    };
+
+    let mut child = command.stdin(Stdio::piped()).spawn()?;
     if let Some(stdin) = child.stdin.as_mut() {
         stdin.write_all(text.as_bytes())?;
     }
-    child.wait()?;
-    Ok(())
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "clipboard command failed"))
+    }
 }
 
 /// Human-readable byte size.

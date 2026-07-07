@@ -31,6 +31,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::Input { kind, buffer } => render_input(frame, *kind, buffer),
         Mode::Confirm { name, is_dir } => render_confirm(frame, name, *is_dir),
         Mode::ConfirmRemoteDelete { name, .. } => render_confirm_remote_delete(frame, name),
+        Mode::Message { title, text } => render_message(frame, title, text),
         Mode::Auth(form) => render_auth(frame, form),
         Mode::Quota(state) => render_quota(frame, state),
         Mode::Browse => {}
@@ -342,6 +343,28 @@ fn render_confirm_remote_delete(frame: &mut Frame, name: &str) {
         ),
         area,
     );
+}
+
+fn render_message(frame: &mut Frame, title: &str, text: &str) {
+    let area = centered_rect(frame.area(), 86, 7);
+    frame.render_widget(Clear, area);
+
+    let block = Block::bordered().title(title).border_style(Style::new().fg(ACCENT));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(text.to_string()),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Select/copy from terminal ", Style::new().dark_gray()),
+            Span::styled("Esc/any key", Style::new().fg(ACCENT).bold()),
+            Span::styled(" close", Style::new().dark_gray()),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_auth(frame: &mut Frame, form: &AuthForm) {
