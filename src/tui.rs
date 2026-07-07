@@ -42,6 +42,7 @@ fn on_key(app: &mut App, key: KeyEvent) {
         Mode::Browse => on_browse_key(app, key.code),
         Mode::Input { kind, buffer } => on_input_key(app, key.code, kind, buffer),
         Mode::Confirm { name, is_dir } => on_confirm_key(app, key.code, name, is_dir),
+        Mode::ConfirmRemoteDelete { id, name } => on_confirm_remote_delete_key(app, key.code, id, name),
         Mode::Auth(form) => on_auth_key(app, key.code, form),
         Mode::Quota(_) => {
             // Any key dismisses the quota overlay.
@@ -57,6 +58,9 @@ fn on_browse_key(app: &mut App, code: KeyCode) {
         KeyCode::Home | KeyCode::Char('g') => app.select_first(),
         KeyCode::End | KeyCode::Char('G') => app.select_last(),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.enter(),
+        KeyCode::Char('R') if app.view == View::Files => app.regenerate_selected_file_url(),
+        KeyCode::Char('c') if app.view == View::Files => app.copy_selected_short_download_url(),
+        KeyCode::Char('D') if app.view == View::Files => app.download_selected_file(),
         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => app.go_up(),
         KeyCode::Char('r') => {
             app.refresh();
@@ -75,7 +79,9 @@ fn on_browse_key(app: &mut App, code: KeyCode) {
             };
         }
         KeyCode::Char('d') | KeyCode::Delete => {
-            if app.view == View::FileManager {
+            if app.view == View::Files {
+                app.confirm_delete_selected_remote_file();
+            } else if app.view == View::FileManager {
                 if let Some(entry) = app.selected_entry()
                     && !entry.parent
                 {
@@ -144,6 +150,12 @@ fn on_confirm_key(app: &mut App, code: KeyCode, name: String, is_dir: bool) {
         app.delete(&name, is_dir);
     }
     // otherwise cancel: mode already reset to Browse
+}
+
+fn on_confirm_remote_delete_key(app: &mut App, code: KeyCode, id: i64, name: String) {
+    if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        app.delete_remote_file(id, &name);
+    }
 }
 
 fn on_auth_key(app: &mut App, code: KeyCode, mut form: AuthForm) {

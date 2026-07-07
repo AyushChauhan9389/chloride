@@ -83,15 +83,6 @@ pub fn run(config: &mut Config) -> Result<()> {
 
     println!();
     println!("Regenerated URLs for #{} ({})", file.id, file.name);
-    if let Some(raw) = urls.view_url {
-        println!("raw view: {raw}");
-    }
-    if let Some(short) = urls.short_view_url {
-        println!("short view: {short}");
-    }
-    if let Some(raw) = urls.download_url {
-        println!("raw download: {raw}");
-    }
     if let Some(short) = urls.short_download_url {
         println!("short download: {short}");
     }

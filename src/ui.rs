@@ -30,6 +30,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Input { kind, buffer } => render_input(frame, *kind, buffer),
         Mode::Confirm { name, is_dir } => render_confirm(frame, name, *is_dir),
+        Mode::ConfirmRemoteDelete { name, .. } => render_confirm_remote_delete(frame, name),
         Mode::Auth(form) => render_auth(frame, form),
         Mode::Quota(state) => render_quota(frame, state),
         Mode::Browse => {}
@@ -213,6 +214,18 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
                 key("Enter"),
                 desc(" info"),
                 sep(),
+                key("R"),
+                desc(" regen"),
+                sep(),
+                key("c"),
+                desc(" copy"),
+                sep(),
+                key("D"),
+                desc(" download"),
+                sep(),
+                key("d"),
+                desc(" delete"),
+                sep(),
                 key("f"),
                 desc(" filemgr"),
             ];
@@ -294,6 +307,37 @@ fn render_confirm(frame: &mut Frame, name: &str, is_dir: bool) {
         Paragraph::new(text).block(
             Block::bordered()
                 .title(" Confirm delete ")
+                .border_style(Style::new().fg(Color::Red)),
+        ),
+        area,
+    );
+}
+
+fn render_confirm_remote_delete(frame: &mut Frame, name: &str) {
+    let area = centered_rect(frame.area(), 64, 5);
+    frame.render_widget(Clear, area);
+
+    let text = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Delete remote file "),
+            Span::styled(format!("'{name}'"), Style::new().fg(Color::Red).bold()),
+            Span::raw("?"),
+        ])
+        .centered(),
+        Line::from(vec![
+            Span::styled("y", Style::new().fg(Color::Green).bold()),
+            Span::raw(" confirm    "),
+            Span::styled("n/Esc", Style::new().fg(ACCENT).bold()),
+            Span::raw(" cancel"),
+        ])
+        .centered(),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(text).block(
+            Block::bordered()
+                .title(" Confirm remote delete ")
                 .border_style(Style::new().fg(Color::Red)),
         ),
         area,

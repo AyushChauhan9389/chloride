@@ -182,15 +182,6 @@ pub fn regenerate(file_id: Option<i64>) -> Result<()> {
     let urls = api::regenerate_urls(&mut config, file_id)?;
 
     println!("Regenerated URLs for file #{file_id}");
-    if let Some(raw) = urls.view_url {
-        println!("raw view: {raw}");
-    }
-    if let Some(short) = urls.short_view_url {
-        println!("short view: {short}");
-    }
-    if let Some(raw) = urls.download_url {
-        println!("raw download: {raw}");
-    }
     if let Some(short) = urls.short_download_url {
         println!("short download: {short}");
     }

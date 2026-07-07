@@ -330,6 +330,42 @@ pub fn regenerate_urls(config: &mut Config, file_id: i64) -> Result<RegenerateUr
     parse_regenerate(resp)
 }
 
+pub fn delete_file(config: &mut Config, file_id: i64) -> Result<()> {
+    let token = ensure_token(config)?;
+    let url = format!(
+        "{}/api/files/{}",
+        config.base_url.trim_end_matches('/'),
+        file_id
+    );
+
+    let resp = Client::new()
+        .delete(&url)
+        .bearer_auth(&token)
+        .send()
+        .context("Failed to connect to server")?;
+
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let new_token = refresh_on_401(config)?;
+        let resp = Client::new()
+            .delete(&url)
+            .bearer_auth(&new_token)
+            .send()
+            .context("Failed to connect to server")?;
+        return parse_delete_file(resp);
+    }
+    parse_delete_file(resp)
+}
+
+fn parse_delete_file(resp: reqwest::blocking::Response) -> Result<()> {
+    let status = resp.status();
+    if !status.is_success() {
+        let body: serde_json::Value = resp.json().unwrap_or_default();
+        let msg = body["message"].as_str().unwrap_or("Failed to delete file");
+        bail!("{msg}");
+    }
+    Ok(())
+}
+
 fn parse_regenerate(resp: reqwest::blocking::Response) -> Result<RegenerateUrlsResult> {
     let status = resp.status();
     if !status.is_success() {

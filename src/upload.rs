@@ -143,9 +143,6 @@ pub fn run(config: &Config, files: &[std::path::PathBuf], expires_in: Option<i64
     for r in &results {
         println!();
         println!("✅ file #{}", r.fileId);
-        println!("   raw view: {}", r.view_url);
-        println!("   short view: {}", r.short_view_url);
-        println!("   raw download: {}", r.download_url);
         println!("   short download: {}", r.short_download_url);
     }
     Ok(())

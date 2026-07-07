@@ -18,6 +18,7 @@ pub enum Mode {
     Browse,
     Input { kind: InputKind, buffer: String },
     Confirm { name: String, is_dir: bool },
+    ConfirmRemoteDelete { id: i64, name: String },
     Auth(AuthForm),
     Quota(Option<Result<crate::api::StorageInfo, String>>),
 }
@@ -299,6 +300,91 @@ impl App {
         }
     }
 
+    pub fn regenerate_selected_file_url(&mut self) {
+        if self.view != View::Files {
+            return;
+        }
+        let Some(file) = self.selected_file().cloned() else {
+            self.set_error("No file selected");
+            return;
+        };
+
+        match crate::api::regenerate_urls(&mut self.config, file.id) {
+            Ok(urls) => {
+                if let Some(selected) = self.remote_files.get_mut(self.selected) {
+                    selected.short_download_url = urls.short_download_url.clone();
+                    selected.short_view_url = urls.short_view_url.clone();
+                    selected.original_view_url = urls.view_url.clone();
+                    selected.original_download_url = urls.download_url.clone();
+                }
+                self.set_success(format!("Regenerated short download URL for '{}'", file.name));
+            }
+            Err(e) => self.set_error(format!("Failed to regenerate URL: {e}")),
+        }
+    }
+
+    pub fn copy_selected_short_download_url(&mut self) {
+        let Some(url) = self.selected_short_download_url() else {
+            self.set_error("No short download URL. Press R to regenerate.");
+            return;
+        };
+
+        match copy_to_clipboard(&url) {
+            Ok(()) => self.set_success("Copied short download URL"),
+            Err(e) => self.set_error(format!("Failed to copy URL: {e}")),
+        }
+    }
+
+    pub fn download_selected_file(&mut self) {
+        let Some(file) = self.selected_file().cloned() else {
+            self.set_error("No file selected");
+            return;
+        };
+        let Some(url) = file.short_download_url.clone() else {
+            self.set_error("No short download URL. Press R to regenerate.");
+            return;
+        };
+
+        match download_to_current_dir(&url, &file.name) {
+            Ok(path) => self.set_success(format!("Downloaded to {}", path.display())),
+            Err(e) => self.set_error(format!("Failed to download: {e}")),
+        }
+    }
+
+    pub fn confirm_delete_selected_remote_file(&mut self) {
+        if self.view != View::Files {
+            return;
+        }
+        let Some(file) = self.selected_file() else {
+            self.set_error("No file selected");
+            return;
+        };
+        self.mode = Mode::ConfirmRemoteDelete {
+            id: file.id,
+            name: file.name.clone(),
+        };
+    }
+
+    pub fn delete_remote_file(&mut self, id: i64, name: &str) {
+        match crate::api::delete_file(&mut self.config, id) {
+            Ok(()) => {
+                self.remote_files.retain(|file| file.id != id);
+                if self.selected >= self.remote_files.len() {
+                    self.selected = self.remote_files.len().saturating_sub(1);
+                }
+                self.set_success(format!("Deleted remote file '{name}'"));
+            }
+            Err(e) => self.set_error(format!("Failed to delete remote file: {e}")),
+        }
+    }
+
+    fn selected_short_download_url(&self) -> Option<String> {
+        if self.view != View::Files {
+            return None;
+        }
+        self.selected_file()?.short_download_url.clone()
+    }
+
     pub fn go_up(&mut self) {
         if self.view != View::FileManager {
             return;
@@ -401,6 +487,84 @@ impl App {
             kind: StatusKind::Error,
         };
     }
+}
+
+fn download_to_current_dir(url: &str, name: &str) -> anyhow::Result<std::path::PathBuf> {
+    let path = unique_download_path(std::env::current_dir()?.join(name));
+    let mut response = reqwest::blocking::get(url)?.error_for_status()?;
+    let mut file = std::fs::File::create(&path)?;
+    std::io::copy(&mut response, &mut file)?;
+    Ok(path)
+}
+
+fn unique_download_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    if !path.exists() {
+        return path;
+    }
+
+    let parent = path.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".into());
+    let extension = path.extension().map(|s| s.to_string_lossy().into_owned());
+
+    for i in 1.. {
+        let file_name = match &extension {
+            Some(ext) => format!("{stem} ({i}).{ext}"),
+            None => format!("{stem} ({i})"),
+        };
+        let candidate = parent.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!()
+}
+
+#[cfg(target_os = "windows")]
+fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("clip").stdin(Stdio::piped()).spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let program = if Command::new("wl-copy").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() {
+        "wl-copy"
+    } else {
+        "xclip"
+    };
+    let mut child = Command::new(program).args(["-selection", "clipboard"]).stdin(Stdio::piped()).spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
 }
 
 /// Human-readable byte size.
