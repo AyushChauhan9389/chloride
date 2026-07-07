@@ -394,6 +394,29 @@ pub struct UploadResult {
     pub expires_in: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case)]
+struct PresignUploadResult {
+    key: String,
+    uploadUrl: String,
+}
+
+#[derive(Debug, Serialize)]
+#[allow(non_snake_case)]
+struct PresignUploadRequest {
+    name: String,
+    contentType: String,
+    size: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[allow(non_snake_case)]
+struct CompleteUploadRequest {
+    key: String,
+    name: String,
+    expiresIn: i64,
+}
+
 /// A progress reporter called periodically during upload.
 /// Arguments: `(bytes_sent, total_bytes)`.
 pub type ProgressFn = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
@@ -450,8 +473,9 @@ async fn do_upload(
     expires_in: i64,
     on_progress: ProgressFn,
 ) -> Result<UploadResult> {
-    let bytes = std::sync::Arc::new(bytes.to_vec());
+    let presign = presign_upload(token, base_url, file_name, content_type, total).await?;
 
+    let bytes = std::sync::Arc::new(bytes.to_vec());
     let stream = futures_util::stream::unfold(0u64, move |mut sent| {
         let on_progress = on_progress.clone();
         let bytes = bytes.clone();
@@ -470,21 +494,41 @@ async fn do_upload(
     });
 
     let body = reqwest::Body::wrap_stream(stream);
-
-    let part = reqwest::multipart::Part::stream_with_length(body, total)
-        .file_name(file_name.to_string())
-        .mime_str(content_type)?;
-
-    let form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("expiresIn", expires_in.to_string());
-
-    let url = format!("{}/api/upload/single", base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
     let resp = client
+        .put(&presign.uploadUrl)
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .header(reqwest::header::CONTENT_LENGTH, total)
+        .body(body)
+        .send()
+        .await
+        .context("Failed to upload to storage")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Storage upload failed ({status}): {body}");
+    }
+
+    complete_upload(token, base_url, &presign.key, file_name, expires_in).await
+}
+
+async fn presign_upload(
+    token: &str,
+    base_url: &str,
+    file_name: &str,
+    content_type: &str,
+    size: u64,
+) -> Result<PresignUploadResult> {
+    let url = format!("{}/api/upload/presign", base_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token)
-        .multipart(form)
+        .json(&PresignUploadRequest {
+            name: file_name.to_string(),
+            contentType: content_type.to_string(),
+            size,
+        })
         .send()
         .await
         .context("Failed to connect to server")?;
@@ -495,7 +539,40 @@ async fn do_upload(
     }
     if !status.is_success() {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let msg = body["message"].as_str().unwrap_or("Upload failed");
+        let msg = body["message"].as_str().unwrap_or("Failed to prepare upload");
+        bail!("{msg}");
+    }
+
+    resp.json().await.context("Invalid response from server")
+}
+
+async fn complete_upload(
+    token: &str,
+    base_url: &str,
+    key: &str,
+    file_name: &str,
+    expires_in: i64,
+) -> Result<UploadResult> {
+    let url = format!("{}/api/upload/complete", base_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token)
+        .json(&CompleteUploadRequest {
+            key: key.to_string(),
+            name: file_name.to_string(),
+            expiresIn: expires_in,
+        })
+        .send()
+        .await
+        .context("Failed to connect to server")?;
+
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        bail!("Unauthorized");
+    }
+    if !status.is_success() {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let msg = body["message"].as_str().unwrap_or("Failed to complete upload");
         bail!("{msg}");
     }
 

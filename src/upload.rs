@@ -128,6 +128,17 @@ pub fn run(config: &Config, files: &[std::path::PathBuf], expires_in: Option<i64
         .sum();
     let file_count = specs.len();
 
+    let mut quota_config = config.clone();
+    let storage = api::get_storage(&mut quota_config)?;
+    let _ = quota_config.save();
+    if !storage.is_unlimited() && total_size > storage.left.max(0) as u64 {
+        bail!(
+            "Upload is too large for your remaining quota: {} requested, {} left",
+            human_size(total_size),
+            human_size(storage.left.max(0) as u64)
+        );
+    }
+
     let chosen_expiry = match expires_in {
         Some(e) => e,
         None => pick_expiry()?,
