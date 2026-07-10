@@ -1,8 +1,11 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::api::RemoteFile;
 use crate::config::Config;
+
+const DEFAULT_UPLOAD_EXPIRES_IN: i64 = 60 * 60 * 24 * 7;
 
 /// Which list the TUI is showing.
 #[derive(Clone, Copy, PartialEq)]
@@ -384,6 +387,55 @@ impl App {
         }
     }
 
+    pub fn upload_selected_local_file(&mut self) {
+        if self.view != View::FileManager {
+            return;
+        }
+
+        let Some(entry) = self.selected_entry() else {
+            self.set_error("No file selected");
+            return;
+        };
+        if entry.parent || entry.is_dir {
+            self.set_error("Select a file to upload");
+            return;
+        }
+
+        let name = entry.name.clone();
+        let path = self.cwd.join(&name);
+        let content_type = mime_for(&name);
+        let config = Arc::new(Mutex::new(self.config.clone()));
+        let progress = Arc::new(|_, _| {}) as crate::api::ProgressFn;
+
+        let result = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime.block_on(crate::api::upload_file(
+                &config,
+                &path,
+                &name,
+                &content_type,
+                DEFAULT_UPLOAD_EXPIRES_IN,
+                progress,
+            )),
+            Err(e) => Err(e.into()),
+        };
+
+        if let Ok(cfg) = config.lock() {
+            self.config = cfg.clone();
+            let _ = self.config.save();
+        }
+
+        match result {
+            Ok(upload) => {
+                self.mode = Mode::Message {
+                    title: " Uploaded ".into(),
+                    text: upload.short_download_url,
+                };
+                self.set_success(format!("Uploaded '{name}'"));
+            }
+            Err(e) => self.set_error(format!("Failed to upload '{name}': {e}")),
+        }
+    }
+
     fn selected_short_download_url(&self) -> Option<String> {
         if self.view != View::Files {
             return None;
@@ -492,6 +544,31 @@ impl App {
             message: message.into(),
             kind: StatusKind::Error,
         };
+    }
+}
+
+fn mime_for(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".png") {
+        "image/png".into()
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg".into()
+    } else if lower.ends_with(".gif") {
+        "image/gif".into()
+    } else if lower.ends_with(".pdf") {
+        "application/pdf".into()
+    } else if lower.ends_with(".txt") || lower.ends_with(".md") {
+        "text/plain".into()
+    } else if lower.ends_with(".zip") {
+        "application/zip".into()
+    } else if lower.ends_with(".apk") {
+        "application/vnd.android.package-archive".into()
+    } else if lower.ends_with(".mp4") {
+        "video/mp4".into()
+    } else if lower.ends_with(".mp3") {
+        "audio/mpeg".into()
+    } else {
+        "application/octet-stream".into()
     }
 }
 

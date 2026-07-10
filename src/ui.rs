@@ -254,6 +254,9 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
                 key("d"),
                 desc(" delete"),
                 sep(),
+                key("U"),
+                desc(" upload"),
+                sep(),
                 key("f"),
                 desc(" files"),
             ];

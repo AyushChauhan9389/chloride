@@ -64,6 +64,7 @@ fn on_browse_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('R') if app.view == View::Files => app.regenerate_selected_file_url(),
         KeyCode::Char('c') if app.view == View::Files => app.copy_selected_short_download_url(),
         KeyCode::Char('D') if app.view == View::Files => app.download_selected_file(),
+        KeyCode::Char('U') if app.view == View::FileManager => app.upload_selected_local_file(),
         KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => app.go_up(),
         KeyCode::Char('r') => {
             app.refresh();
