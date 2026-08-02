@@ -1,0 +1,120 @@
+name: release
+
+# Two ways to cut a release, both driven by a version you choose:
+#   1. push a tag:      git tag v1.2.3 && git push origin v1.2.3
+#   2. Actions → release → "Run workflow" → type v1.2.3
+# The tag is the source of truth: Cargo.toml's version is rewritten to match
+# before building, so `cl --version` and the self-updater always agree with it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. v1.2.3)"
+        required: true
+      prerelease:
+        description: "Mark as a pre-release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.version || github.ref_name }}
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            bin: cl
+            asset: cl-x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: cl.exe
+            asset: cl-x86_64-pc-windows-msvc.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          echo "Building version $version"
+          # Only the first `version = ` line — that's the [package] one.
+          sed -i.bak -E "0,/^version = .*/s//version = \"$version\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+          grep -m1 '^version' Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # `ring` (rustls' crypto backend) compiles C, so musl needs a real
+      # toolchain. cc-rs looks for `x86_64-linux-musl-gcc`; musl-tools installs
+      # it as `musl-gcc`, hence the explicit CC below.
+      - name: Install musl toolchain
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - run: cargo test --target ${{ matrix.target }}
+
+      - run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Assets are plain uncompressed binaries — the install scripts and the
+      # in-CLI updater both fetch them straight from
+      # /releases/latest/download/<asset>, so no archive handling anywhere.
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -l
+          sha256sum cl-* > SHA256SUMS
+          cat SHA256SUMS
+          # Per-asset sums too, so the install scripts can verify one download.
+          for f in cl-*; do sha256sum "$f" > "$f.sha256"; done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          prerelease: ${{ inputs.prerelease == true }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

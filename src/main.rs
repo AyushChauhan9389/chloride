@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod tui;
 mod ui;
+mod update;
 mod upload;
 mod regenerate;
 
@@ -12,7 +13,7 @@ use app::AuthKind;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "cl", about = "🧪 Chloride — a tiny file manager")]
+#[command(name = "cl", version, about = "🧪 Chloride — all-in-one DevOps utils CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -55,6 +56,8 @@ enum Command {
     Quota,
     /// Regenerate raw presigned URLs for an uploaded file
     Regenerate { file_id: Option<i64> },
+    /// Update cl to the latest release
+    Update,
     /// Upload file(s) to Chloride
     Upload {
         /// Files to upload
@@ -66,7 +69,15 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+
+    // `cl update` does its own, louder check — everything else gets the
+    // once-a-day silent one.
+    if !matches!(command, Some(Command::Update)) {
+        update::auto_update();
+    }
+
+    match command {
         None | Some(Command::Tui) => tui::launch(None),
         Some(Command::Touch { filenames }) => {
             for filename in &filenames {
@@ -87,6 +98,7 @@ fn main() -> Result<()> {
         Some(Command::Whoami) => commands::whoami(),
         Some(Command::Quota) => commands::quota(),
         Some(Command::Regenerate { file_id }) => commands::regenerate(file_id),
+        Some(Command::Update) => update::run_update(),
         Some(Command::Upload { files, expires_in }) => commands::upload(files, expires_in),
     }
 }
