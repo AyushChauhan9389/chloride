@@ -3,8 +3,11 @@ name: release
 # Two ways to cut a release, both driven by a version you choose:
 #   1. push a tag:      git tag v1.2.3 && git push origin v1.2.3
 #   2. Actions → release → "Run workflow" → type v1.2.3
-# The tag is the source of truth: Cargo.toml's version is rewritten to match
-# before building, so `cl --version` and the self-updater always agree with it.
+# The tag is the source of truth. Before building, scripts/set-version.sh writes
+# it into every version-carrying file (Cargo.toml, Cargo.lock, the NSIS
+# installer) so `cl --version` and the self-updater always agree with it; after
+# publishing, the same write is committed back to main so the repo never drifts
+# behind the released version.
 on:
   push:
     tags: ["v*"]
@@ -45,13 +48,7 @@ jobs:
 
       - name: Set version from tag
         shell: bash
-        run: |
-          version="${TAG#v}"
-          echo "Building version $version"
-          # Only the first `version = ` line — that's the [package] one.
-          sed -i.bak -E "0,/^version = .*/s//version = \"$version\"/" Cargo.toml
-          rm -f Cargo.toml.bak
-          grep -m1 '^version' Cargo.toml
+        run: ./scripts/set-version.sh "${TAG#v}"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -72,9 +69,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - run: cargo test --target ${{ matrix.target }}
+      - run: cargo test --locked --target ${{ matrix.target }}
 
-      - run: cargo build --release --target ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         shell: bash
@@ -93,6 +90,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Checked out first: actions/checkout cleans the workspace, so it has to
+      # run before the artifacts land in dist/.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -118,3 +121,22 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: dist/*
+
+      # Only after the release actually published: bring main's version-carrying
+      # files up to what was just released, so the repo never drifts behind the
+      # published version. Runs last so a failed build never bumps anything.
+      # GITHUB_TOKEN pushes do not re-trigger workflows, and this one only fires
+      # on tags anyway, so there is no loop.
+      - name: Sync version in repo files
+        run: |
+          ./scripts/set-version.sh "${TAG#v}"
+          if git diff --quiet; then
+            echo "repo files already at ${TAG#v} — nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: set version to ${TAG#v}"
+          # Someone may have pushed while the build ran.
+          git pull --rebase origin main
+          git push origin HEAD:main

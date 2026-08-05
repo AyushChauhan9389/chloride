@@ -5,7 +5,7 @@
 !define APP_NAME "Chloride CLI"
 !define APP_PUBLISHER "Chloride"
 !define APP_EXE "cl.exe"
-!define APP_VERSION "0.1.0"
+!define APP_VERSION "2.0.0"
 !define INSTALL_REGKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ChlorideCLI"
 
 Name "${APP_NAME}"

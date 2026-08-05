@@ -183,8 +183,28 @@ Local file manager mode also supports:
 
 Everything is built on GitHub Actions — nothing is built or uploaded from your
 machine. `.github/workflows/release.yml` does the work, and the tag you choose
-is the version: it's written into `Cargo.toml` before building, so
-`cl --version` and the self-updater always agree with the release.
+is the version.
+
+You never edit a version by hand. `scripts/set-version.sh` owns every
+version-carrying file:
+
+| File | What it sets |
+|---|---|
+| `Cargo.toml` | `[package] version` |
+| `Cargo.lock` | the `chloride-tui` entry (so `--locked` builds stay valid) |
+| `installer/nsis/chloride-cli.nsi` | `APP_VERSION` |
+
+The workflow runs it twice: once **before building**, so `cl --version` and the
+self-updater agree with the tag, and once **after publishing**, committing the
+result back to `main` as `chore: set version to X` so the repo never drifts
+behind the released version. That commit lands after the tag, so the tag's tree
+still shows the previous number — the published binary is always correct
+regardless.
+
+To add another file that carries a version, add it to `apply_all()` in the
+script and both paths pick it up. Run it by hand with
+`scripts/set-version.sh 1.2.3`, or check the logic with
+`scripts/set-version.sh --self-test`.
 
 ### The pre-push hook (easiest)
 
