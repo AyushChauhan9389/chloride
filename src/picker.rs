@@ -413,10 +413,13 @@ fn action(key: KeyEvent) -> Action {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => Action::Quit,
         (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) => Action::Quit,
-        (KeyCode::Down, KeyModifiers::CONTROL) => Action::NextFile,
-        (KeyCode::Up, KeyModifiers::CONTROL) => Action::PreviousFile,
-        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => Action::Down,
-        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => Action::Up,
+        // Plain arrows hop between files; Ctrl (and vim's j/k) moves one
+        // result at a time. File-level movement is the common gesture — a
+        // busy file would otherwise take a dozen presses to get past.
+        (KeyCode::Down, KeyModifiers::CONTROL) | (KeyCode::Char('j'), _) => Action::Down,
+        (KeyCode::Up, KeyModifiers::CONTROL) | (KeyCode::Char('k'), _) => Action::Up,
+        (KeyCode::Down, _) => Action::NextFile,
+        (KeyCode::Up, _) => Action::PreviousFile,
         (KeyCode::Enter, _) => Action::Select,
         (KeyCode::Char('E' | 'e'), _) => Action::Edit,
         (KeyCode::Char('p'), KeyModifiers::CONTROL) => Action::Preview,
@@ -731,7 +734,8 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
         if state.content_count() > CONTENT_CAP {
             hints.push(key("⇥", if state.expanded { "fold" } else { "all" }));
         }
-        hints.push(key("^↑↓", "file"));
+        hints.push(key("↑↓", "file"));
+        hints.push(key("^↑↓", "line"));
         hints.push(key("^p", "preview"));
         hints.push(key("esc", "quit"));
         format!("   {}", hints.join("   "))
@@ -965,19 +969,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_arrows_are_file_navigation_actions() {
+    fn plain_arrows_hop_files_and_ctrl_arrows_move_lines() {
         let ctrl = KeyModifiers::CONTROL;
+        let none = KeyModifiers::NONE;
         assert!(matches!(
-            action(KeyEvent::new(KeyCode::Down, ctrl)),
+            action(KeyEvent::new(KeyCode::Down, none)),
             Action::NextFile
         ));
         assert!(matches!(
-            action(KeyEvent::new(KeyCode::Up, ctrl)),
+            action(KeyEvent::new(KeyCode::Up, none)),
             Action::PreviousFile
         ));
         assert!(matches!(
-            action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            action(KeyEvent::new(KeyCode::Down, ctrl)),
             Action::Down
+        ));
+        assert!(matches!(
+            action(KeyEvent::new(KeyCode::Up, ctrl)),
+            Action::Up
+        ));
+        // Vim fingers keep row-by-row movement on j/k.
+        assert!(matches!(
+            action(KeyEvent::new(KeyCode::Char('j'), none)),
+            Action::Down
+        ));
+        assert!(matches!(
+            action(KeyEvent::new(KeyCode::Char('k'), none)),
+            Action::Up
         ));
     }
 
