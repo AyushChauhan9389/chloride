@@ -429,10 +429,50 @@ fn edit(row: &Row) -> Result<()> {
     Ok(())
 }
 
-/// Three-column extension tag, e.g. `rs `, `yml`, `png`. Plain ASCII on
-/// purpose: emoji icons render as blanks or tofu wherever the terminal font
-/// lacks them, and terminals disagree about emoji width, which breaks the
-/// fixed-width block. The extension is what made the list scannable anyway.
+/// File-type emoji, or `None` for extensions without a good one. Every glyph
+/// here has default emoji presentation (no variation selector needed), which
+/// makes it unambiguously two columns wide — mixed-width emoji are what made
+/// the block drift on some terminals.
+fn emoji(path: &Path) -> Option<&'static str> {
+    let e = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "rs" => "🦀",
+        "ts" | "tsx" | "js" | "jsx" | "mjs" => "📜",
+        "json" | "toml" | "yaml" | "yml" | "lock" => "🔧",
+        "md" | "txt" => "📄",
+        "sh" | "bash" | "ps1" | "nsi" => "🐚",
+        "png" | "jpg" | "jpeg" | "gif" | "svg" => "🎨",
+        "zip" | "gz" | "tar" | "apk" => "📦",
+        _ => return None,
+    };
+    Some(e)
+}
+
+/// Three-column file badge: the emoji plus a pad space, or the ASCII
+/// extension tag for extensions with no emoji — and for everything when
+/// `CL_NO_EMOJI=1`, the escape hatch for terminals whose font draws emoji as
+/// blanks or tofu.
+fn badge(path: &Path) -> String {
+    static EMOJI_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ok = *EMOJI_OK.get_or_init(|| std::env::var_os("CL_NO_EMOJI").is_none());
+    badge_with(ok, path)
+}
+
+fn badge_with(emoji_ok: bool, path: &Path) -> String {
+    if emoji_ok {
+        if let Some(e) = emoji(path) {
+            return format!("{e} ");
+        }
+    }
+    tag(path)
+}
+
+/// Three-column extension tag, e.g. `rs `, `yml`, `png`.
 fn tag(path: &Path) -> String {
     let ext: String = path
         .extension()
@@ -537,7 +577,7 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
                 } else {
                     format!("{}", rel.display())
                 };
-                let head = format!(" {rail} {DIM}{}{RESET} {name}", tag(path));
+                let head = format!(" {rail} {DIM}{}{RESET} {name}", badge(path));
                 let chip = format!(
                     "{DIM}{} · {}{RESET}",
                     crate::app::human_size(row.size),
@@ -574,7 +614,7 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
                         .count();
                     let head = format!(
                         "   {DIM}{} {dir}{RESET}{ACCENT}{BOLD}{name}{RESET}",
-                        tag(path)
+                        badge(path)
                     );
                     let chip = format!(
                         "{DIM}{hits} · {}{RESET}",
@@ -884,18 +924,19 @@ mod tests {
     }
 
     #[test]
-    fn tags_are_ascii_and_three_columns_wide() {
-        // Emoji icons rendered as tofu on terminals without an emoji font and
-        // have ambiguous width; tags must be plain ASCII and fixed-width so
-        // every row lines up everywhere.
-        for p in ["a.rs", "b.yaml", "c.png", "Makefile", "d.tar.gz"] {
-            let t = tag(Path::new(p));
-            assert!(t.is_ascii(), "{t:?}");
-            assert_eq!(t.chars().count(), 3, "{t:?}");
+    fn badges_are_three_columns_in_both_modes() {
+        use crate::inline::visible_width;
+        // Whatever the mode, a badge must occupy exactly three columns or the
+        // rows stop lining up.
+        for p in ["a.rs", "b.yaml", "c.png", "Makefile", "d.tar.gz", "e.zip"] {
+            assert_eq!(visible_width(&badge_with(true, Path::new(p))), 3, "{p}");
+            assert_eq!(visible_width(&badge_with(false, Path::new(p))), 3, "{p}");
         }
-        assert_eq!(tag(Path::new("a.rs")), "rs ");
-        assert_eq!(tag(Path::new("b.yaml")), "yam");
-        assert_eq!(tag(Path::new("Makefile")), "   ");
+        assert_eq!(badge_with(true, Path::new("a.rs")), "🦀 ");
+        assert_eq!(badge_with(false, Path::new("a.rs")), "rs ");
+        // No emoji suits a .d dep file; the tag steps in even in emoji mode.
+        assert_eq!(badge_with(true, Path::new("x.d")), "d  ");
+        assert_eq!(badge_with(false, Path::new("Makefile")), "   ");
     }
 
     #[test]
