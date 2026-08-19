@@ -95,6 +95,17 @@ Quota:
 cl quota
 ```
 
+Print the logo (truecolor terminal art; falls back to monochrome braille in
+pipes or with `NO_COLOR`):
+
+```bash
+cl logo
+```
+
+The art is pre-rendered from `assets/logo/chloride-cli-lockup.svg` and
+embedded in the binary — regenerate it after a logo change with
+`python3 scripts/logo-to-ansi.py` (needs `rsvg-convert` and ImageMagick).
+
 Upload:
 
 ```bash

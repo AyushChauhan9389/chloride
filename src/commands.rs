@@ -134,6 +134,30 @@ pub fn whoami() -> Result<()> {
     Ok(())
 }
 
+/// `cl logo`. The colour form needs a truecolor-capable terminal; pipes,
+/// NO_COLOR, and dumb terminals get the monochrome braille rendering instead
+/// (which is also what survives a copy-paste into an issue or a README).
+pub fn logo() -> Result<()> {
+    use std::io::IsTerminal;
+    let color = io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
+    print!(
+        "{}",
+        if color {
+            crate::logo::LOGO_COLOR
+        } else {
+            crate::logo::LOGO_PLAIN
+        }
+    );
+    println!();
+    println!(
+        "  \u{1F9EA} Chloride v{} \u{2014} https://chloride.carbonkit.tech",
+        env!("CARGO_PKG_VERSION")
+    );
+    Ok(())
+}
+
 pub fn quota() -> Result<()> {
     let mut config = Config::load()?;
     if !config.is_logged_in() && config.refresh_token.is_none() {
@@ -300,6 +324,31 @@ pub fn regenerate(file_id: Option<i64>) -> Result<()> {
     Ok(())
 }
 
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn logo_art_is_terminal_safe() {
+        // Both renderings must fit a standard 80-column terminal.
+        for art in [crate::logo::LOGO_COLOR, crate::logo::LOGO_PLAIN] {
+            assert!(!art.is_empty());
+            for line in art.lines() {
+                assert!(
+                    crate::inline::visible_width(line) <= 80,
+                    "row too wide: {line:?}"
+                );
+            }
+        }
+        // Colour rows close their attributes so nothing bleeds into the
+        // shell prompt that follows.
+        for line in crate::logo::LOGO_COLOR.lines() {
+            assert!(line.ends_with("\u{1b}[0m"), "unterminated row: {line:?}");
+        }
+        // The plain form is what lands in pipes and pasted text: it must
+        // carry no escape sequences at all.
+        assert!(!crate::logo::LOGO_PLAIN.contains('\u{1b}'));
+    }
+}
 
 /// Git-diff style content output: a heading per file, a line-number gutter,
 /// dimmed context, and `⋮` wherever the matches are not contiguous.

@@ -8,6 +8,7 @@ mod update;
 mod upload;
 mod regenerate;
 mod inline;
+mod logo;
 mod picker;
 mod search;
 
@@ -108,6 +109,8 @@ enum Command {
         #[command(flatten)]
         opts: SearchOpts,
     },
+    /// Print the Chloride logo
+    Logo,
     /// Update cl to the latest release
     Update,
     /// Upload file(s) to Chloride
@@ -168,6 +171,7 @@ fn main() -> Result<()> {
                 opts,
             ),
         },
+        Some(Command::Logo) => commands::logo(),
         Some(Command::Update) => update::run_update(),
         Some(Command::Upload { files, expires_in }) => commands::upload(files, expires_in),
     }
