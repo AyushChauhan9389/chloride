@@ -7,10 +7,39 @@ mod ui;
 mod update;
 mod upload;
 mod regenerate;
+mod inline;
+mod picker;
+mod search;
 
 use anyhow::Result;
 use app::AuthKind;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+
+/// Flags shared by every search entry point.
+#[derive(Args)]
+pub struct SearchOpts {
+    /// Skip dotfiles and dot-directories (they are searched by default)
+    #[arg(long)]
+    pub no_hidden: bool,
+    /// Ignore .gitignore/.ignore rules
+    #[arg(short = 'I', long)]
+    pub no_ignore: bool,
+    /// Stop after this many results
+    #[arg(short = 'm', long)]
+    pub limit: Option<usize>,
+    /// Only files with this extension, e.g. -e rs
+    #[arg(short = 'e', long)]
+    pub ext: Option<String>,
+    /// Separate results with NUL instead of newline (for xargs -0)
+    #[arg(short = '0', long = "print0")]
+    pub print0: bool,
+    /// Lines of context around each content match
+    #[arg(short = 'C', long, default_value_t = 1)]
+    pub context: usize,
+    /// Print results instead of opening the interactive picker
+    #[arg(long)]
+    pub no_input: bool,
+}
 
 #[derive(Parser)]
 #[command(name = "cl", version, about = "🧪 Chloride — all-in-one DevOps utils CLI")]
@@ -56,6 +85,29 @@ enum Command {
     Quota,
     /// Regenerate raw presigned URLs for an uploaded file
     Regenerate { file_id: Option<i64> },
+    /// Find files by name and content
+    ///
+    /// Searches file contents (regex) by default. Use -f to match file names
+    /// instead (substring, or a glob like '*.zip'). A pattern that cannot be a
+    /// regex, such as '*.zip', falls back to a name search automatically.
+    #[command(visible_alias = "f")]
+    Find {
+        /// Omit to open the file-manager TUI
+        pattern: Option<String>,
+        /// Directory to search (default: current)
+        path: Option<String>,
+        /// Match file names instead of contents
+        #[arg(short = 'f', long, conflicts_with = "content")]
+        files: bool,
+        /// Match file contents (the default; use to force it for a glob-like pattern)
+        #[arg(short = 'c', long)]
+        content: bool,
+        /// With -c: print only the names of files containing matches
+        #[arg(short = 'l', long)]
+        files_with_matches: bool,
+        #[command(flatten)]
+        opts: SearchOpts,
+    },
     /// Update cl to the latest release
     Update,
     /// Upload file(s) to Chloride
@@ -78,7 +130,7 @@ fn main() -> Result<()> {
     }
 
     match command {
-        None | Some(Command::Tui) => tui::launch(None),
+        None | Some(Command::Tui) => tui::launch(None, None),
         Some(Command::Touch { filenames }) => {
             for filename in &filenames {
                 commands::touch_file(filename)?;
@@ -92,12 +144,30 @@ fn main() -> Result<()> {
             force,
         }) => commands::remove_path(&path, recursive, force),
         Some(Command::Pwd) => commands::print_working_directory(),
-        Some(Command::Login) => tui::launch(Some(AuthKind::Login)),
-        Some(Command::Register) => tui::launch(Some(AuthKind::Register)),
+        Some(Command::Login) => tui::launch(Some(AuthKind::Login), None),
+        Some(Command::Register) => tui::launch(Some(AuthKind::Register), None),
         Some(Command::Logout) => commands::logout(),
         Some(Command::Whoami) => commands::whoami(),
         Some(Command::Quota) => commands::quota(),
         Some(Command::Regenerate { file_id }) => commands::regenerate(file_id),
+        Some(Command::Find {
+            pattern,
+            path,
+            files,
+            content,
+            files_with_matches,
+            opts,
+        }) => match pattern {
+            None => tui::launch(None, Some(app::View::FileManager)),
+            Some(pattern) => commands::search(
+                pattern,
+                path,
+                files,
+                content,
+                files_with_matches,
+                opts,
+            ),
+        },
         Some(Command::Update) => update::run_update(),
         Some(Command::Upload { files, expires_in }) => commands::upload(files, expires_in),
     }

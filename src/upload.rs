@@ -9,6 +9,7 @@ use anyhow::{bail, Result};
 use crate::api::{self, UploadResult};
 use crate::app::human_size;
 use crate::config::Config;
+use crate::inline::{pad_to, redraw, term_width};
 
 const EXPIRY_OPTIONS: &[(i64, &str)] = &[
     (60 * 60 * 24 * 7, "7 days"),
@@ -30,71 +31,6 @@ struct UploadState {
     finished: bool,
     error: Option<String>,
     result: Option<UploadResult>,
-}
-
-/// Return the terminal width in columns, or 80 if it can't be detected.
-fn term_width() -> usize {
-    crossterm::terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
-}
-
-/// Truncate a string to `max` visible characters, accounting for Unicode
-/// width (roughly — ignores ANSI escape codes in the count).
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    let mut len = 0;
-    for c in s.chars() {
-        if len + 1 > max.saturating_sub(1) {
-            out.push('…');
-            break;
-        }
-        out.push(c);
-        len += 1;
-    }
-    out
-}
-
-/// Redraw `lines` in place using per-line clears. Never uses `\x1b[J`
-/// (clear-to-end-of-screen) which would eat content below our block.
-/// Instead moves up, then for each row: `\r\x1b[K` (clear line only) + content.
-/// Caller must pass a FIXED number of lines every time so `prev_lines`
-/// never grows (pad with empty strings if needed).
-fn redraw(lines: &[String], prev_lines: &mut usize) {
-    let width = term_width();
-    let mut out = String::new();
-
-    if *prev_lines > 1 {
-        // After drawing N lines, the cursor is already on line N. Moving up
-        // N rows jumps above our block; move up N-1 to return to line 1.
-        out.push_str(&format!("\x1b[{}A", *prev_lines - 1));
-    }
-
-    for (i, line) in lines.iter().enumerate() {
-        out.push_str("\r\x1b[K"); // clear THIS line only, cursor stays at col 0
-        if i < lines.len() {
-            out.push_str(&truncate(line, width));
-        }
-        if i + 1 < lines.len() {
-            out.push_str("\r\n");
-        }
-    }
-
-    print!("{}", out);
-    io::stdout().flush().ok();
-    *prev_lines = lines.len();
-}
-
-/// Pad `lines` with empty strings up to `n` rows, so the line count is
-/// stable across redraws (prevents cursor drift).
-fn pad_to(lines: Vec<String>, n: usize) -> Vec<String> {
-    let mut v = lines;
-    while v.len() < n {
-        v.push(String::new());
-    }
-    v.truncate(n);
-    v
 }
 
 pub fn run(config: &Config, files: &[std::path::PathBuf], expires_in: Option<i64>) -> Result<()> {

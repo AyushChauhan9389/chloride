@@ -7,6 +7,10 @@ use crate::config::Config;
 
 const DEFAULT_UPLOAD_EXPIRES_IN: i64 = 60 * 60 * 24 * 7;
 
+/// Cap on results held for the TUI search list. Enough to scroll through,
+/// bounded so a one-letter query on a huge tree cannot exhaust memory.
+const TUI_SEARCH_LIMIT: usize = 2000;
+
 /// Which list the TUI is showing.
 #[derive(Clone, Copy, PartialEq)]
 pub enum View {
@@ -19,6 +23,10 @@ pub enum View {
 /// What the UI is currently doing.
 pub enum Mode {
     Browse,
+    /// Live search over the current directory. State lives in `App::search`
+    /// because the running walk owns a channel that cannot be cloned around
+    /// the way `Mode` values are.
+    Search,
     Input { kind: InputKind, buffer: String },
     Confirm { name: String, is_dir: bool },
     ConfirmRemoteDelete { id: i64, name: String },
@@ -115,6 +123,28 @@ pub struct Status {
     pub kind: StatusKind,
 }
 
+/// A live search driven from the TUI.
+pub struct SearchState {
+    pub query: String,
+    pub hits: Vec<crate::search::Hit>,
+    pub selected: usize,
+    /// The running walk. Dropping it cancels the worker threads, which is how
+    /// a stale search is stopped the instant the query changes — otherwise
+    /// every keystroke would leave a walk burning CPU in the background.
+    pub running: Option<crate::search::Search>,
+}
+
+impl SearchState {
+    pub fn new() -> Self {
+        Self {
+            query: String::new(),
+            hits: Vec::new(),
+            selected: 0,
+            running: None,
+        }
+    }
+}
+
 pub struct App {
     pub running: bool,
     pub view: View,
@@ -125,6 +155,7 @@ pub struct App {
     pub mode: Mode,
     pub status: Status,
     pub config: Config,
+    pub search: Option<SearchState>,
 }
 
 impl App {
@@ -144,6 +175,7 @@ impl App {
                 kind: StatusKind::Info,
             },
             config,
+            search: None,
         };
         app.refresh();
         app
@@ -475,7 +507,7 @@ impl App {
             Ok(_) => {
                 self.set_success(format!("Created file '{name}'"));
                 self.refresh();
-                self.select_name(name);
+                self.select_by_name(name);
             }
             Err(e) => self.set_error(format!("Failed to create file: {e}")),
         }
@@ -495,7 +527,7 @@ impl App {
             Ok(_) => {
                 self.set_success(format!("Created directory '{name}'"));
                 self.refresh();
-                self.select_name(name);
+                self.select_by_name(name);
             }
             Err(e) => self.set_error(format!("Failed to create directory: {e}")),
         }
@@ -517,9 +549,54 @@ impl App {
         }
     }
 
-    fn select_name(&mut self, name: &str) {
+    pub fn select_by_name(&mut self, name: &str) {
         if let Some(index) = self.entries.iter().position(|e| e.name == name) {
             self.selected = index;
+        }
+    }
+
+    // --- Search ---
+
+    /// Restart the walk for the current query, cancelling any previous one.
+    pub fn restart_search(&mut self) {
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        // Dropping the old Search sets its cancel flag.
+        state.running = None;
+        state.hits.clear();
+        state.selected = 0;
+
+        if state.query.is_empty() {
+            return;
+        }
+        let mut query = crate::search::Query::new(
+            state.query.clone(),
+            self.cwd.clone(),
+            crate::search::Kind::Both,
+        );
+        query.limit = Some(TUI_SEARCH_LIMIT);
+        match crate::search::spawn(query) {
+            Ok(search) => state.running = Some(search),
+            // An in-progress regex like "a(" is not an error worth shouting
+            // about; the user is still typing.
+            Err(_) => state.running = None,
+        }
+    }
+
+    /// Move any results the walk has produced into the visible list.
+    pub fn drain_search(&mut self) {
+        let Some(state) = self.search.as_mut() else {
+            return;
+        };
+        let Some(search) = state.running.as_ref() else {
+            return;
+        };
+        for _ in 0..512 {
+            match search.hits.try_recv() {
+                Ok(hit) => state.hits.push(hit),
+                Err(_) => break,
+            }
         }
     }
 
