@@ -1,6 +1,21 @@
-# Chloride CLI/TUI
+<div align="center">
+  <img src="assets/logo/chloride-cli-lockup.png" alt="Chloride" width="520">
 
-🧪 **Chloride** — all-in-one DevOps utils CLI. Rust CLI and terminal UI for Chloride file uploads, URL regeneration, quota checks, and local file browsing.
+  <h3>🧪 all-in-one DevOps utils CLI</h3>
+
+  <p>
+    Fast Rust CLI and terminal UI for Chloride: file uploads with shareable
+    links, an inline fuzzy-ish <code>find</code> with live preview, quota
+    checks, URL regeneration, and local file management — in one small,
+    self-updating binary.
+  </p>
+
+  <p>
+    <a href="https://github.com/AyushChauhan9389/chloride/releases/latest"><img src="https://img.shields.io/github/v/release/AyushChauhan9389/chloride?label=release&color=b7cb24" alt="latest release"></a>
+    <a href="https://github.com/AyushChauhan9389/chloride/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/AyushChauhan9389/chloride/release.yml?label=build" alt="build"></a>
+    <img src="https://img.shields.io/badge/rust-2024_edition-2b2b2b" alt="rust 2024">
+  </p>
+</div>
 
 ## Install
 
@@ -22,15 +37,17 @@ checksum, and put `cl` on your `PATH`. Override the destination with
 
 ## Features
 
-- Login/register against the Chloride API
-- Persist auth config at `~/.config/chloride/config.json`
-- Auto-refresh access tokens with refresh tokens
-- List uploaded files by default in the TUI
-- Switch to local file manager with `f`
-- Upload files with inline expiry picker and progress UI
-- Show storage quota and usage
+- **`cl find`** — name + content search built on ripgrep's engine, with an
+  inline interactive picker: live results, match highlighting, emoji file
+  badges, and a preview pane that follows the cursor
+- **Uploads** with an inline expiry picker, live progress bars, and shareable
+  short links
+- **Fullscreen TUI** for remote files and a local file manager
+- Login/register against the Chloride API, with auto-refreshing tokens
+- Storage quota and usage at a glance
 - Regenerate raw presigned URLs for uploaded files
 - Keeps itself up to date from GitHub Releases
+- One small static binary; config lives at `~/.config/chloride/config.json`
 
 ## API
 
@@ -138,6 +155,48 @@ cl mkdir folder
 cl rm file.txt
 cl pwd
 ```
+
+## Find
+
+Search file contents (regex, smart-case) and file names in one walk:
+
+```bash
+cl find token            # content search, opens the inline picker
+cl find '*.zip'          # glob patterns search file names automatically
+cl find -f zip           # force a name search
+cl f token src/          # alias, and an optional root directory
+```
+
+On a terminal this opens an **inline picker** — a fixed-height block that
+redraws in place, so your scrollback stays clean. Results stream in live,
+grouped by file, with the matched term highlighted and a preview pane beside
+the list on wide terminals.
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | jump to the previous / next **file** |
+| `Ctrl+↑` / `Ctrl+↓` (or `k` / `j`) | move one **line** at a time |
+| `Enter` | print the selection (`path` or `path:line`) and exit |
+| `e` | open the hit in `$EDITOR` at the matched line |
+| `/` | edit the query live |
+| `Tab` | unfold / fold results past the content cap |
+| `Ctrl+p` | toggle the preview pane |
+| `Esc` / `q` | cancel |
+
+The picker draws on **stderr** and prints the selection on **stdout**, so it
+composes: `cl upload "$(cl find zip)"` shows the picker, then uploads what you
+picked. Without a terminal (CI, pipes with `--no-input`) results stream as
+plain lines instead:
+
+```bash
+cl find -l TODO                  # just the file names
+cl find TODO --no-input | wc -l  # stream, don't prompt
+cl find -f '*.log' -0 | xargs -0 rm
+```
+
+Dotfiles are searched by default (`.env`, `.github/` — the ones you actually
+want), `.git/` never is, and `.gitignore` rules apply unless you pass `-I`.
+Set `CL_NO_EMOJI=1` if your terminal font renders the file badges as boxes.
 
 ## Updating
 
