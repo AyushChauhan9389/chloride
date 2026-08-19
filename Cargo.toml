@@ -34,6 +34,9 @@ tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 async-channel = "2"
 crossterm = "0.29"
+# Column widths for emoji/CJK in the inline UIs. Already in the tree via
+# ratatui, so this costs nothing.
+unicode-width = "0.2"
 # ripgrep's own engine, linked in — no `rg` binary needed at runtime.
 grep-regex = "0.1"
 grep-searcher = "0.1"

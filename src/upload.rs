@@ -1,6 +1,5 @@
 //! Upload: inline expiry picker + live progress bar (no fullscreen TUI).
 
-use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,7 +8,7 @@ use anyhow::{bail, Result};
 use crate::api::{self, UploadResult};
 use crate::app::human_size;
 use crate::config::Config;
-use crate::inline::{pad_to, redraw, term_width};
+use crate::inline::{finish, pad_to, redraw, term_width};
 
 const EXPIRY_OPTIONS: &[(i64, &str)] = &[
     (60 * 60 * 24 * 7, "7 days"),
@@ -153,10 +152,8 @@ fn pick_expiry() -> Result<i64> {
     terminal::disable_raw_mode()?;
     // Cursor is already on the picker's last line. One newline starts the next
     // output below it without jumping extra rows or clearing user scrollback.
-    if prev_lines > 0 {
-        print!("\r\n");
-        io::stdout().flush()?;
-    }
+    // On stderr, like the block itself — stdout may be a pipe.
+    finish(prev_lines);
     result
 }
 
@@ -244,11 +241,9 @@ fn run_uploads(
         }
 
         // Cursor is already on the progress block's last line. One newline
-        // leaves the final progress visible and continues below it.
-        if prev_lines > 0 {
-            print!("\r\n");
-            io::stdout().flush()?;
-        }
+        // leaves the final progress visible and continues below it. On stderr,
+        // like the block itself — stdout may be a pipe.
+        finish(prev_lines);
 
         // Print final status for this file.
         let s = state.lock().unwrap().clone();

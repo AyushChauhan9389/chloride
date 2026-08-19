@@ -1,14 +1,12 @@
 //! Inline selector for regenerating raw presigned URLs for uploaded files.
 
-use std::io::{self, Write};
-
 use anyhow::{bail, Result};
 use crossterm::{event::{self, Event, KeyCode}, terminal};
 
 use crate::api::{self, RemoteFile};
 use crate::app::human_size;
 use crate::config::Config;
-use crate::inline::{pad_to, redraw};
+use crate::inline::{finish, pad_to, redraw};
 
 pub fn run(config: &mut Config) -> Result<()> {
     let files = api::list_files(config)?;
@@ -51,8 +49,8 @@ fn pick_file(files: &[RemoteFile]) -> Result<RemoteFile> {
         }
     })();
     terminal::disable_raw_mode()?;
-    print!("\r\n");
-    io::stdout().flush()?;
+    // Close the block on stderr, where it was drawn — stdout may be a pipe.
+    finish(prev_lines);
     result
 }
 

@@ -18,6 +18,8 @@
 
 use std::io::{self, Write};
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 /// Terminal width in columns, or 80 when it cannot be determined.
 ///
 /// Some pseudo-terminals report a width of 0 rather than failing outright, so
@@ -32,18 +34,51 @@ pub fn term_width() -> usize {
     }
 }
 
+/// Consume one escape sequence after its `ESC`, copying it to `out` when
+/// given. Understands CSI (`ESC [ ... final-byte`, where the final byte is
+/// anything in `@`..=`~`, not just a letter — bracketed-paste markers end in
+/// `~`), OSC (`ESC ] ... BEL` or `ESC ] ... ESC \`, used by terminal
+/// hyperlinks), and treats anything else as a two-character escape.
+fn consume_escape<I: Iterator<Item = char>>(chars: &mut I, mut out: Option<&mut String>) {
+    let mut push = |c: char| {
+        if let Some(o) = out.as_deref_mut() {
+            o.push(c);
+        }
+    };
+    match chars.next() {
+        Some('[') => {
+            push('[');
+            for c in chars.by_ref() {
+                push(c);
+                if ('\x40'..='\x7e').contains(&c) {
+                    break;
+                }
+            }
+        }
+        Some(']') => {
+            push(']');
+            let mut prev_esc = false;
+            for c in chars.by_ref() {
+                push(c);
+                if c == '\x07' || (prev_esc && c == '\\') {
+                    break;
+                }
+                prev_esc = c == '\x1b';
+            }
+        }
+        Some(c) => push(c),
+        None => {}
+    }
+}
+
 /// Drop ANSI escape sequences so display width can be counted from the visible
 /// characters alone.
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::new();
-    let mut chars = s.chars().peekable();
+    let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
+            consume_escape(&mut chars, None);
         } else {
             out.push(c);
         }
@@ -58,34 +93,32 @@ pub fn strip_ansi(s: &str) -> String {
 /// stripped text loses every attribute, which shows up as unstyled rows
 /// wherever a line happens to be long.
 pub fn truncate(s: &str, max: usize) -> String {
-    if strip_ansi(s).chars().count() <= max {
+    if visible_width(s) <= max {
         return s.to_string();
     }
 
     let mut out = String::new();
     let mut visible = 0usize;
     let mut saw_escape = false;
-    let mut chars = s.chars().peekable();
+    let mut chars = s.chars();
 
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             // Copy the whole sequence; it costs no display width.
             saw_escape = true;
             out.push(c);
-            for next in chars.by_ref() {
-                out.push(next);
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
+            consume_escape(&mut chars, Some(&mut out));
             continue;
         }
-        if visible + 1 >= max {
+        // Columns, not chars: emoji and CJK are two columns wide, and counting
+        // them as one makes a full-width line wrap and the block drift a row.
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if visible + w > max.saturating_sub(1) {
             out.push('…');
             break;
         }
         out.push(c);
-        visible += 1;
+        visible += w;
     }
 
     // Close any still-open attribute so it cannot bleed into the next row.
@@ -95,9 +128,10 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-/// Visible width of a string, ignoring escape sequences.
+/// Visible width of a string in terminal columns, ignoring escape sequences.
+/// Emoji and CJK characters count as the two columns they occupy.
 pub fn visible_width(s: &str) -> usize {
-    strip_ansi(s).chars().count()
+    UnicodeWidthStr::width(strip_ansi(s).as_str())
 }
 
 /// Truncate to `width` visible columns, then pad with spaces to exactly that
@@ -210,6 +244,34 @@ mod tests {
         // row to a single ellipsis.
         let w = term_width();
         assert!(w >= 20, "got {w}");
+    }
+
+    #[test]
+    fn width_is_counted_in_terminal_columns_not_chars() {
+        // Emoji occupy two columns; counting them as one char made a
+        // full-width picker row wrap and the whole block drift down a row.
+        assert_eq!(visible_width("🦀 rs"), 5);
+        assert_eq!(visible_width("漢字"), 4);
+        // fit() pads to columns, so an icon column still lines up.
+        assert_eq!(visible_width(&fit("🦀", 4)), 4);
+        // truncate() also budgets columns: the crab is 2, so only one more
+        // column is left for the ellipsis.
+        assert_eq!(truncate("🦀abc", 3), "🦀…");
+        // Exactly at the limit is left alone.
+        assert_eq!(truncate("🦀🦀", 4), "🦀🦀");
+    }
+
+    #[test]
+    fn strip_ansi_handles_osc_and_non_letter_csi_finals() {
+        // An OSC hyperlink is terminated by BEL (or ESC \), not by a letter —
+        // the old scan stopped at the first letter inside the URL.
+        assert_eq!(
+            strip_ansi("\x1b]8;;http://x\x07link\x1b]8;;\x07"),
+            "link"
+        );
+        // CSI final bytes span @..=~, not just letters: bracketed-paste
+        // markers end in '~' and used to swallow the following text.
+        assert_eq!(strip_ansi("\x1b[200~text\x1b[201~"), "text");
     }
 
     #[test]

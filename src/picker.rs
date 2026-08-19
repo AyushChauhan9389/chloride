@@ -44,11 +44,6 @@ const ACCENT: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
-/// Selection highlight: a filled rail rather than a background block, which
-/// survives terminals with unusual colour schemes.
-/// Matched term inside a line.
-const HOT: &str = "\x1b[1;33m";
-
 /// One selectable row.
 struct Row {
     hit: Hit,
@@ -244,25 +239,28 @@ fn drive(
     let root = root.as_path();
     let mut search = Some(search);
     loop {
-        // Drain whatever the walk has produced since the last repaint.
+        // Drain whatever the walk has produced since the last repaint. The
+        // drain itself detects the closed channel — probing again after the
+        // loop would race a late hit and silently drop it.
         if let Some(active) = search.as_ref() {
             let mut drained = 0;
-            while let Ok(hit) = active.hits.try_recv() {
-                state.insert(hit);
-                drained += 1;
-                // Don't starve the UI on a firehose; repaint and come back.
-                if drained >= 512 {
-                    break;
+            loop {
+                match active.hits.try_recv() {
+                    Ok(hit) => {
+                        state.insert(hit);
+                        drained += 1;
+                        // Don't starve the UI on a firehose; repaint and come
+                        // back.
+                        if drained >= 512 {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        state.done = true;
+                        break;
+                    }
                 }
-            }
-            if drained == 0
-                && !state.done
-                && matches!(
-                    active.hits.try_recv(),
-                    Err(std::sync::mpsc::TryRecvError::Disconnected)
-                )
-            {
-                state.done = true;
             }
         } else {
             state.done = true;
@@ -431,29 +429,11 @@ fn icon(path: &Path) -> &'static str {
     }
 }
 
-/// Bold the matched term inside a line so the eye lands on it. Literal,
-/// case-insensitive: close enough visually, and it cannot fail on a regex.
-fn highlight(text: &str, pattern: &str) -> String {
-    if pattern.is_empty() {
-        return text.to_string();
-    }
-    let hay = text.to_lowercase();
-    let needle = pattern.to_lowercase();
-    match hay.find(&needle) {
-        Some(i) if needle.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') => {
-            format!(
-                "{}{HOT}{}{RESET}{}",
-                &text[..i],
-                &text[i..i + needle.len()],
-                &text[i + needle.len()..]
-            )
-        }
-        _ => text.to_string(),
-    }
+fn render(state: &State, root: &Path) -> Vec<String> {
+    render_at_width(state, root, term_width())
 }
 
-fn render(state: &State, root: &Path) -> Vec<String> {
-    let term = term_width();
+fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
     let visible = state.visible_rows();
     let show_preview = state.preview && term >= PREVIEW_MIN_WIDTH;
     // Results get the whole width when there is no preview beside them.
@@ -527,11 +507,9 @@ fn render(state: &State, root: &Path) -> Vec<String> {
             " ".into()
         };
         match &row.hit {
-            Hit::Line { line, text, .. } => {
-                let t = highlight(text.trim_end(), &state.pattern);
-                let t = if selected { t } else { format!("{DIM}{t}{RESET}") };
-                body.push(format!("  {marker} {DIM}{line:>5}{RESET} {DIM}│{RESET} {t}"));
-            }
+            Hit::Line { line, .. } => body.push(format!(
+                "  {marker} {DIM}line {line}{RESET}"
+            )),
             Hit::File { .. } => body.push(format!(
                 "  {marker} {DIM}{:>5}   {}{RESET}",
                 "",
@@ -769,5 +747,29 @@ mod tests {
         let root = Path::new("");
         assert_eq!(row(true, 0).selection(root), "a");
         assert_eq!(row(false, 0).selection(root), "a:1");
+    }
+
+    #[test]
+    fn content_match_text_is_rendered_only_in_the_preview() {
+        let path = std::env::temp_dir().join(format!(
+            "chloride-picker-preview-{}.txt",
+            std::process::id()
+        ));
+        let text = "before\nneedle only once\nafter\n";
+        std::fs::write(&path, text).unwrap();
+
+        let mut state = State::new("needle".into());
+        state.insert(Hit::Line {
+            path: path.clone(),
+            line: 2,
+            text: "needle only once".into(),
+            context: false,
+        });
+
+        let rendered = render_at_width(&state, Path::new("."), 120).join("\n");
+        let plain = crate::inline::strip_ansi(&rendered);
+        assert_eq!(plain.matches("needle only once").count(), 1);
+
+        let _ = std::fs::remove_file(path);
     }
 }
