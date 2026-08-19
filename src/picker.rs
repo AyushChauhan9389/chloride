@@ -44,6 +44,11 @@ const ACCENT: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
 const RESET: &str = "\x1b[0m";
+/// Matched term inside a line.
+const HOT: &str = "\x1b[1;33m";
+/// Header spinner frames while the walk is still running.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// One selectable row.
 struct Row {
     hit: Hit,
@@ -54,6 +59,14 @@ struct Row {
 impl Row {
     fn is_file(&self) -> bool {
         matches!(self.hit, Hit::File { .. })
+    }
+
+    /// Line number for ordering; name hits sort as line 0.
+    fn line(&self) -> u64 {
+        match &self.hit {
+            Hit::File { .. } => 0,
+            Hit::Line { line, .. } => *line,
+        }
     }
 
     /// What gets printed on Enter. Content hits carry `:line` so the caller can
@@ -106,6 +119,8 @@ struct State {
     /// that it follows the item it was on as results stream in around it.
     user_moved: bool,
     prev_lines: usize,
+    /// Repaint counter; drives the header spinner.
+    tick: usize,
     /// One stat per path, shared by every content hit in the same file.
     meta: HashMap<PathBuf, (u64, SystemTime)>,
 }
@@ -133,14 +148,17 @@ impl State {
             done: false,
             user_moved: false,
             prev_lines: 0,
+            tick: 0,
             meta: HashMap::new(),
         }
     }
 
-    /// Insert keeping the list sorted: files before content, then newest first.
+    /// Insert keeping the list sorted: files before content, newest file
+    /// first, then path and line so hits inside one file read top to bottom.
     /// Sorting on insert matters because a parallel walk yields results in
     /// nondeterministic order — appending would make the list visibly reshuffle
-    /// while the user is trying to read it.
+    /// while the user is trying to read it. Without the path/line tiebreak,
+    /// hits in the same file (which share an mtime) landed in arrival order.
     fn insert(&mut self, hit: Hit) {
         let path = hit.path().to_path_buf();
         let (size, mtime) = *self.meta.entry(path).or_insert_with_key(|p| {
@@ -158,6 +176,8 @@ impl State {
                     .cmp(&row.is_file())
                     .reverse()
                     .then_with(|| probe.mtime.cmp(&row.mtime).reverse())
+                    .then_with(|| probe.hit.path().cmp(row.hit.path()))
+                    .then_with(|| probe.line().cmp(&row.line()))
             })
             .unwrap_or_else(|e| e);
         self.rows.insert(pos, row);
@@ -266,6 +286,7 @@ fn drive(
             state.done = true;
         }
 
+        state.tick = state.tick.wrapping_add(1);
         state.clamp();
         let lines = render(state, root);
         let height = lines.len();
@@ -429,6 +450,31 @@ fn icon(path: &Path) -> &'static str {
     }
 }
 
+/// Paint the matched term inside a line so the eye lands on it. Literal and
+/// case-insensitive — close enough visually, and it cannot fail on a
+/// half-typed regex. ASCII-only: lowercasing non-ASCII text can change byte
+/// lengths, and slicing on those offsets could split a character.
+/// `resume` is re-applied after the highlight so a dimmed row stays dimmed.
+fn highlight(text: &str, pattern: &str, resume: &str) -> String {
+    if pattern.is_empty() || !text.is_ascii() || !pattern.is_ascii() {
+        return text.to_string();
+    }
+    let hay = text.to_ascii_lowercase();
+    let needle = pattern.to_ascii_lowercase();
+    match hay.find(&needle) {
+        Some(i) => {
+            let end = i + needle.len();
+            format!(
+                "{}{HOT}{}{RESET}{resume}{}",
+                &text[..i],
+                &text[i..end],
+                &text[end..]
+            )
+        }
+        None => text.to_string(),
+    }
+}
+
 fn render(state: &State, root: &Path) -> Vec<String> {
     render_at_width(state, root, term_width())
 }
@@ -441,26 +487,28 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
 
     let mut lines = Vec::new();
 
-    // ── query line: pattern, mode badge, totals ──────────────────────────
+    // ── query line: prompt, mode badge, live count, spinner ──────────────
     let mode = if state.mode_names { "names" } else { "content" };
     let caret = if state.editing {
         format!("{ACCENT}▏{RESET}")
     } else {
         format!("{DIM}▏{RESET}")
     };
-    let left_head = format!("  {ACCENT}▍{RESET} {BOLD}{}{RESET}{caret}", state.pattern);
-    let right_head = format!(
-        "{DIM}◆ {mode}   {} match{}{RESET}",
-        visible.len(),
-        if visible.len() == 1 { "" } else { "es" }
-    );
+    let left_head = format!("  {ACCENT}›{RESET} {BOLD}{}{RESET}{caret}", state.pattern);
+    let total = state.rows.len();
+    let status = if state.done {
+        format!("{total} match{}", if total == 1 { "" } else { "es" })
+    } else {
+        format!("{total} {}", SPINNER[state.tick % SPINNER.len()])
+    };
+    let right_head = format!("{DIM}◆ {mode} · {status}{RESET}");
     let gap = term
         .saturating_sub(visible_width(&left_head) + visible_width(&right_head) + 2);
     lines.push(String::new());
     lines.push(format!("{left_head}{}{right_head}", " ".repeat(gap)));
     lines.push(String::new());
 
-    // ── results, grouped under their file ────────────────────────────────
+    // ── results: name hits as standalone rows, content hits grouped ──────
     let mut body: Vec<String> = Vec::new();
     if visible.is_empty() {
         body.push(format!(
@@ -477,44 +525,79 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
         }
         let row = &state.rows[i];
         let path = row.hit.path();
-
-        // Group heading whenever the file changes — and always for the first
-        // visible row, so scrolling mid-file never hides which file you are in.
-        if cur != Some(path) {
-            if cur.is_some() {
-                body.push(String::new());
-            }
-            let rel = path.strip_prefix(root).unwrap_or(path);
-            let hits = visible
-                .iter()
-                .filter(|&&j| state.rows[j].hit.path() == path)
-                .count();
-            let head = format!("  {} {ACCENT}{BOLD}{}{RESET}", icon(path), rel.display());
-            let chip = format!(
-                "{DIM}{hits} · {}{RESET}",
-                crate::app::human_size(row.size)
-            );
-            let gap = list_width
-                .saturating_sub(visible_width(&head) + visible_width(&chip));
-            body.push(format!("{head}{}{chip}", " ".repeat(gap)));
-            cur = Some(path);
-        }
-
         let selected = slot == state.selected;
-        let marker = if selected {
-            format!("{ACCENT}▸{RESET}")
+        let rail = if selected {
+            format!("{ACCENT}▌{RESET}")
         } else {
             " ".into()
         };
+
         match &row.hit {
-            Hit::Line { line, .. } => body.push(format!(
-                "  {marker} {DIM}line {line}{RESET}"
-            )),
-            Hit::File { .. } => body.push(format!(
-                "  {marker} {DIM}{:>5}   {}{RESET}",
-                "",
-                ago(row.mtime)
-            )),
+            // A name hit is one self-contained row — a heading above it would
+            // say the same thing twice.
+            Hit::File { .. } => {
+                let rel = path.strip_prefix(root).unwrap_or(path);
+                let name = if selected {
+                    format!("{ACCENT}{BOLD}{}{RESET}", rel.display())
+                } else {
+                    format!("{}", rel.display())
+                };
+                let head = format!(" {rail} {} {name}", icon(path));
+                let chip = format!(
+                    "{DIM}{} · {}{RESET}",
+                    crate::app::human_size(row.size),
+                    ago(row.mtime)
+                );
+                let gap = list_width
+                    .saturating_sub(visible_width(&head) + visible_width(&chip));
+                body.push(format!("{head}{}{chip}", " ".repeat(gap)));
+                cur = None;
+            }
+            Hit::Line { line, text, .. } => {
+                // Heading whenever the file changes — and always for the first
+                // visible row, so scrolling mid-file never hides which file
+                // you are in.
+                if cur != Some(path) {
+                    if !body.is_empty() {
+                        body.push(String::new());
+                    }
+                    let rel = path.strip_prefix(root).unwrap_or(path);
+                    // Dim the directory, bold the file name: the name is what
+                    // distinguishes rows, the path is context.
+                    let (dir, name) = match rel.parent() {
+                        Some(p) if !p.as_os_str().is_empty() => (
+                            format!("{}/", p.display()),
+                            rel.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        ),
+                        _ => (String::new(), rel.display().to_string()),
+                    };
+                    let hits = visible
+                        .iter()
+                        .filter(|&&j| state.rows[j].hit.path() == path)
+                        .count();
+                    let head = format!(
+                        "  {} {DIM}{dir}{RESET}{ACCENT}{BOLD}{name}{RESET}",
+                        icon(path)
+                    );
+                    let chip = format!(
+                        "{DIM}{hits} · {}{RESET}",
+                        crate::app::human_size(row.size)
+                    );
+                    let gap = list_width
+                        .saturating_sub(visible_width(&head) + visible_width(&chip));
+                    body.push(format!("{head}{}{chip}", " ".repeat(gap)));
+                    cur = Some(path);
+                }
+                let text = text.trim_start();
+                let styled = if selected {
+                    highlight(text, &state.pattern, "")
+                } else {
+                    format!("{DIM}{}{RESET}", highlight(text, &state.pattern, DIM))
+                };
+                body.push(format!(" {rail} {DIM}{line:>4} │{RESET} {styled}"));
+            }
         }
         shown_last = slot + 1;
     }
@@ -568,32 +651,42 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
             key("↑↓", "move")
         )
     } else {
-        format!(
-            "   {}   {}   {}   {}   {}",
-            key("/", "refine"),
-            key("↵", "open"),
-            key("e", "edit"),
-            key("^p", "preview"),
-            key("esc", "")
-        )
+        let mut hints = vec![key("↵", "open"), key("e", "edit"), key("/", "refine")];
+        // Only advertise the fold key while the content cap is in play.
+        if state.content_count() > CONTENT_CAP {
+            hints.push(key("⇥", if state.expanded { "fold" } else { "all" }));
+        }
+        hints.push(key("^p", "preview"));
+        hints.push(key("esc", "quit"));
+        format!("   {}", hints.join("   "))
     });
     lines
 }
 
-/// `rows` lines of the selected file centred on its match, cut to `width`.
-/// Always returns exactly `rows` entries so the block height stays fixed.
+/// `rows` lines of the selected file centred on its match under a one-line
+/// filename title, cut to `width`. Always returns exactly `rows` entries so
+/// the block height stays fixed.
 fn preview_lines(row: Option<&Row>, width: usize, rows: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
     let Some(row) = row else {
         return vec![String::new(); rows];
     };
+    let mut out: Vec<String> = Vec::new();
 
+    let name = row
+        .hit
+        .path()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    out.push(format!("{DIM}▍ {name}{RESET}"));
+
+    let body_rows = rows.saturating_sub(1);
     let focus = match &row.hit {
         Hit::Line { line, .. } => *line as usize,
         Hit::File { .. } => 1,
     };
     // Centre on the match without running off the top of the file.
-    let start = focus.saturating_sub(rows / 2).max(1);
+    let start = focus.saturating_sub(body_rows / 2).max(1);
 
     match std::fs::read_to_string(row.hit.path()) {
         Ok(text) => {
@@ -602,7 +695,7 @@ fn preview_lines(row: Option<&Row>, width: usize, rows: usize) -> Vec<String> {
                 .enumerate()
                 .map(|(i, l)| (i + 1, l))
                 .skip(start - 1)
-                .take(rows)
+                .take(body_rows)
             {
                 let body = l.trim_end();
                 out.push(if n == focus && matches!(row.hit, Hit::Line { .. }) {
@@ -743,6 +836,22 @@ mod tests {
     }
 
     #[test]
+    fn hits_inside_one_file_are_ordered_by_line() {
+        let mut s = State::new("q".into());
+        // Arrive out of order, as parallel workers deliver them.
+        for line in [13u64, 79, 1] {
+            s.insert(Hit::Line {
+                path: PathBuf::from("upload.rs"),
+                line,
+                text: "x".into(),
+                context: false,
+            });
+        }
+        let lines: Vec<u64> = s.rows.iter().map(|r| r.line()).collect();
+        assert_eq!(lines, vec![1, 13, 79]);
+    }
+
+    #[test]
     fn selection_includes_the_line_for_content_hits() {
         let root = Path::new("");
         assert_eq!(row(true, 0).selection(root), "a");
@@ -750,26 +859,83 @@ mod tests {
     }
 
     #[test]
-    fn content_match_text_is_rendered_only_in_the_preview() {
-        let path = std::env::temp_dir().join(format!(
-            "chloride-picker-preview-{}.txt",
-            std::process::id()
-        ));
-        let text = "before\nneedle only once\nafter\n";
-        std::fs::write(&path, text).unwrap();
-
+    fn match_text_is_shown_inline_and_highlighted() {
         let mut state = State::new("needle".into());
         state.insert(Hit::Line {
-            path: path.clone(),
+            path: PathBuf::from("src/a.rs"),
             line: 2,
-            text: "needle only once".into(),
+            text: "let needle = 1;".into(),
             context: false,
         });
-
-        let rendered = render_at_width(&state, Path::new("."), 120).join("\n");
+        // 80 columns is too narrow for the preview, so the row itself must
+        // carry the matched text.
+        let rendered = render_at_width(&state, Path::new("."), 80).join("\n");
         let plain = crate::inline::strip_ansi(&rendered);
-        assert_eq!(plain.matches("needle only once").count(), 1);
+        assert!(plain.contains("let needle = 1;"), "{plain}");
+        assert!(rendered.contains(HOT), "matched term should be highlighted");
+        // The heading dims the directory and bolds the file name.
+        assert!(plain.contains("src/"), "{plain}");
+    }
 
-        let _ = std::fs::remove_file(path);
+    #[test]
+    fn name_hits_render_as_one_row_not_a_heading_plus_row() {
+        let mut state = State::new("zip".into());
+        state.insert(Hit::File {
+            path: PathBuf::from("src/zipper.rs"),
+        });
+        let rendered = render_at_width(&state, Path::new("."), 80).join("\n");
+        let plain = crate::inline::strip_ansi(&rendered);
+        assert_eq!(plain.matches("zipper.rs").count(), 1, "{plain}");
+    }
+
+    #[test]
+    fn highlight_is_case_insensitive_and_leaves_non_ascii_alone() {
+        assert!(highlight("Needle here", "needle", "").contains(HOT));
+        // Lowercasing non-ASCII can shift byte offsets; skip rather than risk
+        // slicing mid-character.
+        assert_eq!(highlight("héllo needle", "needle", ""), "héllo needle");
+        assert_eq!(highlight("plain", "zz", ""), "plain");
+        // A dimmed row must stay dimmed after the highlight resets attributes.
+        let h = highlight("a needle b", "needle", DIM);
+        assert!(h.contains(&format!("{RESET}{DIM}")), "{h:?}");
+    }
+}
+
+#[cfg(test)]
+mod smoke {
+    use super::*;
+
+    #[test]
+    #[ignore = "visual smoke test: cargo test smoke -- --ignored --nocapture"]
+    fn dump_a_frame() {
+        let mut state = State::new("expiry".into());
+        state.insert(Hit::File { path: PathBuf::from("src/expiry.rs") });
+        for (line, text) in [
+            (1u64, "//! Upload: inline expiry picker + live progress bar."),
+            (13, "const EXPIRY_OPTIONS: &[(i64, &str)] = &["),
+            (79, "        None => pick_expiry()?,"),
+        ] {
+            state.insert(Hit::Line {
+                path: PathBuf::from("src/upload.rs"),
+                line,
+                text: text.into(),
+                context: false,
+            });
+        }
+        state.insert(Hit::Line {
+            path: PathBuf::from("src/main.rs"),
+            line: 117,
+            text: "        /// Link expiry in seconds (default: interactive picker)".into(),
+            context: false,
+        });
+        state.selected = 2;
+        state.done = true;
+        for l in render_at_width(&state, Path::new("."), 120) {
+            println!("|{l}");
+        }
+        println!("--- narrow (80 cols, no preview) ---");
+        for l in render_at_width(&state, Path::new("."), 80) {
+            println!("|{l}");
+        }
     }
 }
