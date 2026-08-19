@@ -546,6 +546,30 @@ fn render_quota(frame: &mut Frame, state: &Option<Result<crate::api::StorageInfo
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Split `text` so the first literal, case-insensitive occurrence of `pattern`
+/// is drawn hot — the ratatui counterpart of the inline picker's highlight.
+///
+/// ASCII-only: lowercasing non-ASCII text can change byte lengths, and slicing
+/// on those offsets could split a character.
+fn highlight_spans<'a>(text: &'a str, pattern: &str) -> Vec<Span<'a>> {
+    let dim = Style::new().dark_gray();
+    let hot = Style::new().fg(Color::Yellow).bold();
+    if pattern.is_empty() || !text.is_ascii() || !pattern.is_ascii() {
+        return vec![Span::styled(text, dim)];
+    }
+    match text.to_ascii_lowercase().find(&pattern.to_ascii_lowercase()) {
+        Some(i) => {
+            let end = i + pattern.len();
+            vec![
+                Span::styled(&text[..i], dim),
+                Span::styled(&text[i..end], hot),
+                Span::styled(&text[end..], dim),
+            ]
+        }
+        None => vec![Span::styled(text, dim)],
+    }
+}
+
 /// Full-body live search overlay: query line on top, streaming results below.
 fn render_search(frame: &mut Frame, app: &App) {
     let Some(state) = &app.search else { return };
@@ -564,6 +588,25 @@ fn render_search(frame: &mut Frame, app: &App) {
     let [input, list] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(body);
 
+    // Mode badge and spinner mirror the inline picker's header, so the same
+    // query reports the same thing in both front ends.
+    let mode = if state.mode_names { "names" } else { "content" };
+    let status = if state.done {
+        let n = state.hits.len();
+        format!(" ◆ {mode} · {n} match{} ", if n == 1 { "" } else { "es" })
+    } else {
+        const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let frame_idx = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() / 100)
+            .unwrap_or(0)) as usize;
+        format!(
+            " ◆ {mode} · {} {} ",
+            state.hits.len(),
+            SPINNER[frame_idx % SPINNER.len()]
+        )
+    };
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ", Style::new()),
@@ -572,13 +615,14 @@ fn render_search(frame: &mut Frame, app: &App) {
         .block(
             Block::bordered()
                 .title(" Search ")
+                .title(Line::from(status).right_aligned().dark_gray())
                 .border_style(Style::new().fg(Color::Yellow)),
         ),
         input,
     );
 
-    let items: Vec<ListItem> = state
-        .hits
+    let mut items: Vec<ListItem> = state
+        .visible()
         .iter()
         .map(|hit| {
             let path = hit.path();
@@ -588,28 +632,48 @@ fn render_search(frame: &mut Frame, app: &App) {
                 .display()
                 .to_string();
             let spans = match hit {
+                // Per-extension emoji badge, exactly as the inline picker
+                // draws it (and honouring CL_NO_EMOJI the same way).
                 crate::search::Hit::File { .. } => vec![
-                    Span::raw("📄 "),
+                    Span::raw(crate::picker::badge(path)),
+                    Span::raw(" "),
                     Span::styled(shown, Style::new().fg(ACCENT).bold()),
                 ],
-                crate::search::Hit::Line { line, text, .. } => vec![
-                    Span::raw("   "),
-                    Span::styled(shown, Style::new().fg(Color::White)),
-                    Span::styled(format!(":{line}  "), Style::new().dark_gray()),
-                    Span::styled(text.trim().to_string(), Style::new().dark_gray()),
-                ],
+                crate::search::Hit::Line { line, text, .. } => {
+                    let mut spans = vec![
+                        Span::raw(crate::picker::badge(path)),
+                        Span::raw(" "),
+                        Span::styled(shown, Style::new().fg(Color::White)),
+                        Span::styled(format!(":{line}  "), Style::new().dark_gray()),
+                    ];
+                    // Highlight the matched term inside the line, like the
+                    // picker does, so the eye lands on it.
+                    spans.extend(highlight_spans(text.trim(), &state.query));
+                    spans
+                }
             };
             ListItem::new(Line::from(spans))
         })
         .collect();
 
-    let title = format!(" {} results ", state.hits.len());
+    // Folded tail, same cap and wording as the picker's "… N more" row.
+    let hidden = state.hits.len() - state.visible_len();
+    if hidden > 0 {
+        items.push(ListItem::new(Line::from(
+            Span::styled(
+                format!("   ↓ {hidden} more · Tab to show"),
+                Style::new().dark_gray(),
+            ),
+        )));
+    }
+
+    let title = format!(" {} results ", state.visible_len());
     let list_widget = List::new(items)
         .block(
             Block::bordered()
                 .title(title)
                 .title(
-                    Line::from(" ↑↓ move  Enter jump  Esc cancel ")
+                    Line::from(" ↑↓ file  ^↑↓ line  ↵ jump  esc cancel ")
                         .right_aligned()
                         .dark_gray(),
                 )
@@ -623,7 +687,7 @@ fn render_search(frame: &mut Frame, app: &App) {
         .highlight_symbol("▶ ");
 
     let mut list_state = ListState::default();
-    if !state.hits.is_empty() {
+    if state.visible_len() > 0 {
         list_state.select(Some(state.selected));
     }
     frame.render_stateful_widget(list_widget, list, &mut list_state);

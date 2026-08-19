@@ -31,6 +31,58 @@ const CHANNEL_BOUND: usize = 1024;
 /// works as the escape hatch.
 const SKIP_ALWAYS: [&str; 1] = [".git"];
 
+/// Default cap on results for an interactive search (the inline picker and the
+/// TUI overlay). A common word in a large tree matches tens of thousands of
+/// lines; nobody scrolls past a few hundred, and gathering the rest just makes
+/// the UI spend its time inserting and re-sorting instead of drawing. Narrow
+/// the query to see different results rather than more of them.
+pub const DEFAULT_LIMIT: usize = 500;
+
+/// Build the query an interactive search should run for `pattern`.
+///
+/// Contents by default, names when the pattern cannot compile as a regex
+/// (`*.zip` is a glob aimed at file names, and it is the commonest thing
+/// anyone types), capped at [`DEFAULT_LIMIT`]. Both front ends go through
+/// this so a given pattern searches the same thing wherever it is typed.
+pub fn plan(pattern: impl Into<String>, root: impl Into<PathBuf>) -> Query {
+    let pattern = pattern.into();
+    let kind = if is_valid_regex(&pattern) {
+        Kind::Content
+    } else {
+        Kind::Files
+    };
+    let mut query = Query::new(pattern, root, kind);
+    query.limit = Some(DEFAULT_LIMIT);
+    query
+}
+
+/// The order every result list is kept in: name hits before content hits,
+/// newest file first, then path and line so hits inside one file read top to
+/// bottom.
+///
+/// A parallel walk yields results in nondeterministic order, so lists insert
+/// with this rather than appending — otherwise the list visibly reshuffles
+/// while the user is trying to read it. Shared by both front ends so a result
+/// sits in the same place wherever it is shown.
+pub fn compare_hits(
+    (a, a_mtime): (&Hit, std::time::SystemTime),
+    (b, b_mtime): (&Hit, std::time::SystemTime),
+) -> std::cmp::Ordering {
+    fn line(hit: &Hit) -> u64 {
+        match hit {
+            Hit::File { .. } => 0,
+            Hit::Line { line, .. } => *line,
+        }
+    }
+    let is_file = |h: &Hit| matches!(h, Hit::File { .. });
+    is_file(a)
+        .cmp(&is_file(b))
+        .reverse()
+        .then_with(|| a_mtime.cmp(&b_mtime).reverse())
+        .then_with(|| a.path().cmp(b.path()))
+        .then_with(|| line(a).cmp(&line(b)))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Match against file names only.
@@ -597,6 +649,50 @@ mod tests {
         assert!(!is_valid_regex("*.zip"));
         assert!(!is_valid_regex("*.rs"));
         assert!(!is_valid_regex("a("));
+    }
+
+    #[test]
+    fn plan_infers_the_kind_and_caps_results() {
+        // Both front ends go through plan(), so a pattern searches the same
+        // thing wherever it is typed.
+        assert!(plan("TODO", ".").kind == Kind::Content);
+        assert!(plan("^pub fn", ".").kind == Kind::Content);
+        // A glob cannot compile as a regex; it means file names.
+        assert!(plan("*.zip", ".").kind == Kind::Files);
+        // Interactive searches are capped: past a few hundred hits nobody
+        // scrolls, and gathering more just makes the UI lag.
+        assert_eq!(plan("TODO", ".").limit, Some(DEFAULT_LIMIT));
+        assert_eq!(DEFAULT_LIMIT, 500);
+    }
+
+    #[test]
+    fn compare_hits_orders_names_then_recency_then_line() {
+        use std::time::{Duration, SystemTime};
+        let old = SystemTime::UNIX_EPOCH;
+        let new = old + Duration::from_secs(60);
+        let file = |p: &str| Hit::File { path: PathBuf::from(p) };
+        let line = |p: &str, n: u64| Hit::Line {
+            path: PathBuf::from(p),
+            line: n,
+            text: "x".into(),
+            context: false,
+        };
+
+        let ord = std::cmp::Ordering::Less;
+        // Name hits sort ahead of content hits.
+        assert_eq!(compare_hits((&file("a"), old), (&line("a", 1), old)), ord);
+        // Newer files first.
+        assert_eq!(compare_hits((&file("a"), new), (&file("b"), old)), ord);
+        // Within one file, by line.
+        assert_eq!(
+            compare_hits((&line("a", 1), old), (&line("a", 9), old)),
+            ord
+        );
+        // Same mtime: grouped by path so a file's hits stay contiguous.
+        assert_eq!(
+            compare_hits((&line("a", 9), old), (&line("b", 1), old)),
+            ord
+        );
     }
 
     #[test]

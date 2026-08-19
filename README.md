@@ -183,6 +183,11 @@ the list on wide terminals.
 | `Ctrl+p` | toggle the preview pane |
 | `Esc` / `q` | cancel |
 
+Interactive searches stop at 500 hits by default — past that nobody scrolls and
+the UI spends its time sorting instead of drawing. Narrow the query, or raise
+the cap with `-m`. Piped output is never capped, so `cl find x | wc -l` is a
+real count. The same rules apply to the TUI's `/` search.
+
 The picker draws on **stderr** and prints the selection on **stdout**, so it
 composes: `cl upload "$(cl find zip)"` shows the picker, then uploads what you
 picked. Without a terminal (CI, pipes with `--no-input`) results stream as
@@ -232,7 +237,13 @@ Default view is uploaded files from the API.
 - `L`: login form
 - `S`: register form
 - `u`: quota overlay
+- `/`: live search over the current directory
 - `q`: quit
+
+The in-TUI search (`/`) runs the same engine and behaves the same as the
+inline `cl find` picker — same mode inference, same result order, same
+`↑↓` file / `Ctrl+↑↓` line keys, same `Tab` fold. `Enter` jumps the file
+manager to the hit.
 
 Remote files view also supports:
 

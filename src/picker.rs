@@ -19,8 +19,9 @@ use crate::search::{Hit, Query, Search};
 
 /// Content matches shown before collapsing behind a "… N more" row. Content
 /// hits outnumber name hits by orders of magnitude; without a cap a common word
-/// buries the file list under thousands of lines.
-const CONTENT_CAP: usize = 50;
+/// buries the file list under thousands of lines. Shared with the TUI overlay,
+/// which folds at the same point.
+pub const CONTENT_CAP: usize = 50;
 
 /// Visible result rows. The block also spends rows on the prompt, the section
 /// headers and the footer.
@@ -61,7 +62,9 @@ impl Row {
         matches!(self.hit, Hit::File { .. })
     }
 
-    /// Line number for ordering; name hits sort as line 0.
+    /// Line number for ordering; name hits sort as line 0. Ordering itself now
+    /// lives in [`crate::search::compare_hits`], shared with the TUI.
+    #[cfg(test)]
     fn line(&self) -> u64 {
         match &self.hit {
             Hit::File { .. } => 0,
@@ -171,13 +174,10 @@ impl State {
         let pos = self
             .rows
             .binary_search_by(|probe| {
-                probe
-                    .is_file()
-                    .cmp(&row.is_file())
-                    .reverse()
-                    .then_with(|| probe.mtime.cmp(&row.mtime).reverse())
-                    .then_with(|| probe.hit.path().cmp(row.hit.path()))
-                    .then_with(|| probe.line().cmp(&row.line()))
+                crate::search::compare_hits(
+                    (&probe.hit, probe.mtime),
+                    (&row.hit, row.mtime),
+                )
             })
             .unwrap_or_else(|e| e);
         self.rows.insert(pos, row);
@@ -264,13 +264,9 @@ fn restart(state: &mut State, base: &Query, auto_kind: bool) -> Option<Search> {
     let mut q = base.clone();
     q.pattern = state.pattern.clone();
     if auto_kind {
-        // Same rule as the CLI: a pattern that cannot be a regex is a glob
-        // aimed at file names.
-        q.kind = if crate::search::is_valid_regex(&q.pattern) {
-            crate::search::Kind::Content
-        } else {
-            crate::search::Kind::Files
-        };
+        // Same rule as the CLI and the TUI: a pattern that cannot be a regex
+        // is a glob aimed at file names.
+        q.kind = crate::search::plan(&q.pattern, &q.root).kind;
         state.mode_names = q.kind == crate::search::Kind::Files;
     }
     // A half-typed regex is not an error worth showing; just no results yet.
@@ -473,6 +469,7 @@ fn edit(row: &Row) -> Result<()> {
 }
 
 /// File-type emoji, or `None` for extensions without a good one. Every glyph
+/// (see [`badge`], which the TUI overlay shares)
 /// here has default emoji presentation (no variation selector needed), which
 /// makes it unambiguously two columns wide — mixed-width emoji are what made
 /// the block drift on some terminals.
@@ -500,19 +497,17 @@ fn emoji(path: &Path) -> Option<&'static str> {
 /// extension tag for extensions with no emoji — and for everything when
 /// `CL_NO_EMOJI=1`, the escape hatch for terminals whose font draws emoji as
 /// blanks or tofu.
-fn badge(path: &Path) -> String {
+pub fn badge(path: &Path) -> String {
     static EMOJI_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let ok = *EMOJI_OK.get_or_init(|| std::env::var_os("CL_NO_EMOJI").is_none());
     badge_with(ok, path)
 }
 
 fn badge_with(emoji_ok: bool, path: &Path) -> String {
-    if emoji_ok {
-        if let Some(e) = emoji(path) {
-            return format!("{e} ");
-        }
+    match emoji(path) {
+        Some(e) if emoji_ok => format!("{e} "),
+        _ => tag(path),
     }
-    tag(path)
 }
 
 /// Three-column extension tag, e.g. `rs `, `yml`, `png`.

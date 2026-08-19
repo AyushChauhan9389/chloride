@@ -1,5 +1,45 @@
 # Changelog
 
+## v2.1.1 — One search, two front ends
+
+A hotfix for search: the TUI's `/` overlay and the inline `cl find` picker now
+share their semantics instead of each having their own, and interactive
+searches are capped so a common word stops making the UI lag.
+
+### 🐛 Fixed: TUI search now behaves like the inline picker
+
+The two had drifted apart. `/` in the TUI used to search names **and** contents
+unconditionally, append results in whatever order the parallel walk produced
+them (so the list visibly reshuffled while you read it), and gather up to 2000
+hits. It now goes through the same code path as `cl find`:
+
+- **Same mode inference** — contents by default, names for a glob like `*.zip`
+- **Same result order** — name hits first, newest file first, then path and
+  line, so a file's matches read top to bottom and the list stops reshuffling
+- **Same keys** — `↑`/`↓` hop between files, `Ctrl+↑`/`Ctrl+↓` move one line,
+  `Tab` folds results past the content cap
+- **Same look** — per-extension emoji badges (honouring `CL_NO_EMOJI`), the
+  matched term highlighted in each line, a mode badge and a live spinner
+- **Same cursor behaviour** — the selection stays pinned to the top row until
+  you move it, then follows its item as results stream in around it
+
+The shared pieces (`search::plan`, `search::compare_hits`, the content cap and
+the badge renderer) now live in one place, so the two front ends cannot drift
+apart again.
+
+### ⚡ Interactive searches are capped at 500 hits
+
+A one-word query on a large tree matched tens of thousands of lines, and both
+UIs spent their frames inserting and re-sorting instead of drawing — the
+search felt like it was lagging. Interactive searches (the picker and the TUI
+overlay) now stop at **500** hits.
+
+Narrow the query to see different results, or raise the cap explicitly with
+`-m/--limit`. **Piped output is unchanged and still unlimited**, so
+`cl find x | wc -l` remains a real count.
+
+**Full changelog**: https://github.com/AyushChauhan9389/chloride/compare/v2.1.0...v2.1.1
+
 ## v2.1.0 — Find anything, inline
 
 The headline: **`cl find`** — a search command with an interactive inline

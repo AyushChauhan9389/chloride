@@ -7,10 +7,6 @@ use crate::config::Config;
 
 const DEFAULT_UPLOAD_EXPIRES_IN: i64 = 60 * 60 * 24 * 7;
 
-/// Cap on results held for the TUI search list. Enough to scroll through,
-/// bounded so a one-letter query on a huge tree cannot exhaust memory.
-const TUI_SEARCH_LIMIT: usize = 2000;
-
 /// Which list the TUI is showing.
 #[derive(Clone, Copy, PartialEq)]
 pub enum View {
@@ -132,6 +128,19 @@ pub struct SearchState {
     /// a stale search is stopped the instant the query changes — otherwise
     /// every keystroke would leave a walk burning CPU in the background.
     pub running: Option<crate::search::Search>,
+    /// True once the walk has finished, so the header can stop spinning.
+    pub done: bool,
+    /// Whether this walk is matching names rather than contents. Inferred from
+    /// the pattern, exactly as the inline picker and the CLI do.
+    pub mode_names: bool,
+    /// Show content hits past [`crate::picker::CONTENT_CAP`].
+    pub expanded: bool,
+    /// Until the user moves, the cursor stays pinned to the top row; after
+    /// that it follows the item it was on as results stream in around it.
+    pub user_moved: bool,
+    /// One stat per path, shared by every content hit in the same file. Keeps
+    /// the sort stable without re-stat-ing a file per hit.
+    meta: std::collections::HashMap<PathBuf, std::time::SystemTime>,
 }
 
 impl SearchState {
@@ -141,6 +150,116 @@ impl SearchState {
             hits: Vec::new(),
             selected: 0,
             running: None,
+            done: false,
+            mode_names: false,
+            expanded: false,
+            user_moved: false,
+            meta: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Insert keeping the list in [`crate::search::compare_hits`] order, which
+    /// is the same order the inline picker shows: name hits first, newest file
+    /// first, then path and line. A parallel walk arrives out of order, so
+    /// appending would make the list reshuffle as it is read.
+    fn insert(&mut self, hit: crate::search::Hit) {
+        let mtime = *self
+            .meta
+            .entry(hit.path().to_path_buf())
+            .or_insert_with_key(|p| {
+                fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            });
+        let pos = self
+            .hits
+            .binary_search_by(|probe| {
+                let probe_mtime = self
+                    .meta
+                    .get(probe.path())
+                    .copied()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                crate::search::compare_hits((probe, probe_mtime), (&hit, mtime))
+            })
+            .unwrap_or_else(|e| e);
+        self.hits.insert(pos, hit);
+
+        // Only chase the item once the user has taken control of the cursor;
+        // otherwise a streaming result inserted above row 0 would drag the
+        // selection down while they are still reading.
+        if self.user_moved && pos <= self.selected && self.hits.len() > 1 {
+            self.selected += 1;
+        }
+    }
+
+    fn file_count(&self) -> usize {
+        self.hits
+            .iter()
+            .filter(|h| matches!(h, crate::search::Hit::File { .. }))
+            .count()
+    }
+
+    pub fn content_count(&self) -> usize {
+        self.hits.len() - self.file_count()
+    }
+
+    /// How many rows are actually selectable, honouring the content cap.
+    pub fn visible_len(&self) -> usize {
+        let content = if self.expanded {
+            self.content_count()
+        } else {
+            self.content_count().min(crate::picker::CONTENT_CAP)
+        };
+        self.file_count() + content
+    }
+
+    /// The rows to draw, honouring the content cap.
+    pub fn visible(&self) -> &[crate::search::Hit] {
+        &self.hits[..self.visible_len()]
+    }
+
+    /// The selected hit, if any.
+    pub fn current(&self) -> Option<&crate::search::Hit> {
+        self.visible().get(self.selected)
+    }
+
+    pub fn move_down(&mut self) {
+        self.user_moved = true;
+        self.selected = (self.selected + 1).min(self.visible_len().saturating_sub(1));
+    }
+
+    pub fn move_up(&mut self) {
+        self.user_moved = true;
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Move to the first hit of the next (`forward`) or previous distinct file,
+    /// skipping every remaining match in the current one — the same gesture the
+    /// inline picker binds to the plain arrow keys.
+    pub fn move_file(&mut self, forward: bool) {
+        self.user_moved = true;
+        let visible = self.visible_len();
+        let Some(current) = self.hits.get(self.selected).map(|h| h.path().to_path_buf()) else {
+            return;
+        };
+        let mut next = if forward {
+            (self.selected + 1..visible).find(|&i| self.hits[i].path() != current)
+        } else {
+            (0..self.selected).rev().find(|&i| self.hits[i].path() != current)
+        };
+        // A reverse search lands on the previous file's last hit; walk back to
+        // its first so either direction selects the start of a file group.
+        if !forward {
+            while let Some(i) = next {
+                if i > 0 && self.hits[i - 1].path() == self.hits[i].path() {
+                    next = Some(i - 1);
+                } else {
+                    break;
+                }
+            }
+        }
+        if let Some(i) = next {
+            self.selected = i;
         }
     }
 }
@@ -565,17 +684,19 @@ impl App {
         // Dropping the old Search sets its cancel flag.
         state.running = None;
         state.hits.clear();
+        state.meta.clear();
         state.selected = 0;
+        state.user_moved = false;
+        state.expanded = false;
+        state.done = false;
 
         if state.query.is_empty() {
             return;
         }
-        let mut query = crate::search::Query::new(
-            state.query.clone(),
-            self.cwd.clone(),
-            crate::search::Kind::Both,
-        );
-        query.limit = Some(TUI_SEARCH_LIMIT);
+        // Same plan the inline picker and the CLI use: contents by default,
+        // names for a glob, capped at search::DEFAULT_LIMIT.
+        let query = crate::search::plan(state.query.clone(), self.cwd.clone());
+        state.mode_names = query.kind == crate::search::Kind::Files;
         match crate::search::spawn(query) {
             Ok(search) => state.running = Some(search),
             // An in-progress regex like "a(" is not an error worth shouting
@@ -592,11 +713,22 @@ impl App {
         let Some(search) = state.running.as_ref() else {
             return;
         };
+        // Bounded per frame so a firehose cannot starve the redraw. The drain
+        // itself detects the closed channel; probing again afterwards would
+        // race a late hit and drop it.
+        let mut drained = Vec::new();
         for _ in 0..512 {
             match search.hits.try_recv() {
-                Ok(hit) => state.hits.push(hit),
-                Err(_) => break,
+                Ok(hit) => drained.push(hit),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    state.done = true;
+                    break;
+                }
             }
+        }
+        for hit in drained {
+            state.insert(hit);
         }
     }
 
@@ -772,5 +904,107 @@ pub fn human_size(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::Hit;
+    use std::path::Path;
+
+    fn line(path: &str, n: u64) -> Hit {
+        Hit::Line {
+            path: PathBuf::from(path),
+            line: n,
+            text: "x".into(),
+            context: false,
+        }
+    }
+
+    /// Feed hits in the order given, as a parallel walk would.
+    fn state_with(hits: Vec<Hit>) -> SearchState {
+        let mut s = SearchState::new();
+        for h in hits {
+            s.insert(h);
+        }
+        s
+    }
+
+    #[test]
+    fn tui_search_orders_results_like_the_inline_picker() {
+        // Content hits arrive out of order; the list must read top to bottom
+        // per file, with name hits ahead of them — same as the picker.
+        let s = state_with(vec![
+            line("b.rs", 5),
+            Hit::File { path: PathBuf::from("z.rs") },
+            line("b.rs", 1),
+            line("a.rs", 2),
+        ]);
+        let shown: Vec<String> = s
+            .hits
+            .iter()
+            .map(|h| match h {
+                Hit::File { path } => path.display().to_string(),
+                Hit::Line { path, line, .. } => format!("{}:{line}", path.display()),
+            })
+            .collect();
+        assert_eq!(shown[0], "z.rs", "name hits sort first: {shown:?}");
+        let b: Vec<&String> = shown.iter().filter(|s| s.starts_with("b.rs")).collect();
+        assert_eq!(b, vec!["b.rs:1", "b.rs:5"], "{shown:?}");
+    }
+
+    #[test]
+    fn tui_search_caps_content_hits_until_expanded() {
+        let hits: Vec<Hit> = (1..=crate::picker::CONTENT_CAP as u64 + 20)
+            .map(|n| line("a.rs", n))
+            .collect();
+        let mut s = state_with(hits);
+        assert_eq!(s.visible_len(), crate::picker::CONTENT_CAP);
+        assert_eq!(s.visible().len(), crate::picker::CONTENT_CAP);
+        s.expanded = true;
+        assert_eq!(s.visible_len(), crate::picker::CONTENT_CAP + 20);
+    }
+
+    #[test]
+    fn tui_search_arrows_hop_files_and_ctrl_moves_lines() {
+        let mut s = state_with(vec![
+            line("a.rs", 1),
+            line("a.rs", 2),
+            line("a.rs", 3),
+            line("b.rs", 1),
+            line("b.rs", 2),
+        ]);
+        // From a.rs:2, a file hop skips the rest of a.rs.
+        s.selected = 1;
+        s.move_file(true);
+        assert_eq!(s.current().unwrap().path(), Path::new("b.rs"));
+        // Back to the *first* hit of the previous file, not its last.
+        s.move_file(false);
+        assert_eq!(s.selected, 0);
+        // Ends are sticky rather than wrapping.
+        s.move_file(false);
+        assert_eq!(s.selected, 0);
+        // Line movement is one row at a time.
+        s.move_down();
+        assert_eq!(s.selected, 1);
+        s.move_up();
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn streaming_results_do_not_drag_the_cursor_until_the_user_moves() {
+        let mut s = SearchState::new();
+        for n in (1..=10).rev() {
+            s.insert(line("a.rs", n));
+        }
+        assert_eq!(s.selected, 0, "cursor drifted before the user moved it");
+
+        // Once moved, it follows the item it was on.
+        let mut s = state_with(vec![line("b.rs", 2), line("b.rs", 3)]);
+        s.user_moved = true;
+        s.selected = 0;
+        s.insert(line("b.rs", 1));
+        assert_eq!(s.selected, 1, "cursor should follow its item after a move");
     }
 }

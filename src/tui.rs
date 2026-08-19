@@ -3,7 +3,7 @@
 use anyhow::Result;
 use ratatui::{
     DefaultTerminal,
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
 };
 
 use crate::app::{App, AuthForm, AuthKind, InputKind, Mode, SearchState, View};
@@ -64,7 +64,7 @@ fn on_key(app: &mut App, key: KeyEvent) {
         Mode::Quota(_) => {
             // Any key dismisses the quota overlay.
         }
-        Mode::Search => on_search_key(app, key.code),
+        Mode::Search => on_search_key(app, key),
     }
 }
 
@@ -146,8 +146,9 @@ fn on_browse_key(app: &mut App, code: KeyCode) {
     }
 }
 
-fn on_search_key(app: &mut App, code: KeyCode) {
-    match code {
+fn on_search_key(app: &mut App, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
         KeyCode::Esc => {
             // Dropping the state cancels the running walk.
             app.search = None;
@@ -157,7 +158,7 @@ fn on_search_key(app: &mut App, code: KeyCode) {
             // Jump the file manager to the selected hit's directory and land
             // the cursor on it.
             if let Some(state) = &app.search
-                && let Some(hit) = state.hits.get(state.selected)
+                && let Some(hit) = state.current()
             {
                 let path = hit.path().to_path_buf();
                 let name = path
@@ -177,14 +178,31 @@ fn on_search_key(app: &mut App, code: KeyCode) {
             }
             return;
         }
+        // Same bindings as the inline picker: plain arrows hop between files,
+        // Ctrl+arrows step one result at a time.
+        KeyCode::Down if ctrl => {
+            if let Some(state) = app.search.as_mut() {
+                state.move_down();
+            }
+        }
+        KeyCode::Up if ctrl => {
+            if let Some(state) = app.search.as_mut() {
+                state.move_up();
+            }
+        }
         KeyCode::Down => {
             if let Some(state) = app.search.as_mut() {
-                state.selected = (state.selected + 1).min(state.hits.len().saturating_sub(1));
+                state.move_file(true);
             }
         }
         KeyCode::Up => {
             if let Some(state) = app.search.as_mut() {
-                state.selected = state.selected.saturating_sub(1);
+                state.move_file(false);
+            }
+        }
+        KeyCode::Tab => {
+            if let Some(state) = app.search.as_mut() {
+                state.expanded = !state.expanded;
             }
         }
         KeyCode::Backspace => {

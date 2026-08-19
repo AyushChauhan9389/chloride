@@ -238,7 +238,7 @@ pub fn search(
     let mut query = Query::new(pattern, &root, kind);
     query.hidden = !opts.no_hidden;
     query.no_ignore = opts.no_ignore;
-    query.limit = opts.limit;
+    query.limit = search_limit(opts.limit, interactive);
     query.ext = opts.ext.map(|e| e.trim_start_matches('.').to_lowercase());
     // Context only makes sense for the rendered diff view: the picker shows one
     // compact row per hit, and the machine form is line-per-match.
@@ -309,6 +309,21 @@ pub fn search(
     Ok(())
 }
 
+/// How many hits a search should gather.
+///
+/// Interactive searches are capped by default — a common word in a large tree
+/// yields tens of thousands of hits, and the picker ends up spending its time
+/// inserting and re-sorting instead of drawing. Streaming output stays
+/// unlimited, because a pipe usually does want everything (`cl find x | wc -l`
+/// should be a real count). An explicit `-m` wins either way.
+fn search_limit(requested: Option<usize>, interactive: bool) -> Option<usize> {
+    match (requested, interactive) {
+        (Some(n), _) => Some(n),
+        (None, true) => Some(crate::search::DEFAULT_LIMIT),
+        (None, false) => None,
+    }
+}
+
 pub fn regenerate(file_id: Option<i64>) -> Result<()> {
     let mut config = Config::load()?;
     let file_id = match file_id {
@@ -327,6 +342,22 @@ pub fn regenerate(file_id: Option<i64>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn interactive_searches_are_capped_and_pipes_are_not() {
+        use super::search_limit;
+        // The picker lags long before anyone scrolls this far.
+        assert_eq!(
+            search_limit(None, true),
+            Some(crate::search::DEFAULT_LIMIT)
+        );
+        // A pipe wants the real count.
+        assert_eq!(search_limit(None, false), None);
+        // -m wins in both directions, including above the default.
+        assert_eq!(search_limit(Some(10), true), Some(10));
+        assert_eq!(search_limit(Some(100_000), true), Some(100_000));
+        assert_eq!(search_limit(Some(10), false), Some(10));
+    }
+
     #[test]
     fn logo_art_is_terminal_safe() {
         // Both renderings must fit a standard 80-column terminal.
