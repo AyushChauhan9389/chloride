@@ -1,76 +1,12 @@
 //! Inline selector for regenerating raw presigned URLs for uploaded files.
 
-use std::io::{self, Write};
-
 use anyhow::{bail, Result};
 use crossterm::{event::{self, Event, KeyCode}, terminal};
 
 use crate::api::{self, RemoteFile};
 use crate::app::human_size;
 use crate::config::Config;
-
-fn term_width() -> usize {
-    terminal::size().map(|(w, _)| w as usize).unwrap_or(80)
-}
-
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let visible = strip_ansi(s);
-    if visible.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    for (i, c) in visible.chars().enumerate() {
-        if i + 1 >= max {
-            out.push('…');
-            break;
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn redraw(lines: &[String], prev_lines: &mut usize) {
-    let width = term_width();
-    let mut out = String::new();
-    if *prev_lines > 1 {
-        out.push_str(&format!("\x1b[{}A", *prev_lines - 1));
-    }
-    for (i, line) in lines.iter().enumerate() {
-        out.push_str("\r\x1b[K");
-        out.push_str(&truncate(line, width));
-        if i + 1 < lines.len() {
-            out.push_str("\r\n");
-        }
-    }
-    print!("{}", out);
-    io::stdout().flush().ok();
-    *prev_lines = lines.len();
-}
-
-fn pad_to(mut lines: Vec<String>, n: usize) -> Vec<String> {
-    while lines.len() < n {
-        lines.push(String::new());
-    }
-    lines.truncate(n);
-    lines
-}
+use crate::inline::{finish, pad_to, redraw};
 
 pub fn run(config: &mut Config) -> Result<()> {
     let files = api::list_files(config)?;
@@ -113,8 +49,8 @@ fn pick_file(files: &[RemoteFile]) -> Result<RemoteFile> {
         }
     })();
     terminal::disable_raw_mode()?;
-    print!("\r\n");
-    io::stdout().flush()?;
+    // Close the block on stderr, where it was drawn — stdout may be a pipe.
+    finish(prev_lines);
     result
 }
 

@@ -34,6 +34,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::Message { title, text } => render_message(frame, title, text),
         Mode::Auth(form) => render_auth(frame, form),
         Mode::Quota(state) => render_quota(frame, state),
+        Mode::Search => render_search(frame, app),
         Mode::Browse => {}
     }
 }
@@ -543,6 +544,91 @@ fn render_quota(frame: &mut Frame, state: &Option<Result<crate::api::StorageInfo
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Full-body live search overlay: query line on top, streaming results below.
+fn render_search(frame: &mut Frame, app: &App) {
+    let Some(state) = &app.search else { return };
+
+    let area = frame.area();
+    let [_, body, _, _] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+
+    frame.render_widget(Clear, body);
+
+    let [input, list] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(body);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ", Style::new()),
+            Span::styled(state.query.clone(), Style::new().fg(Color::White).bold()),
+        ]))
+        .block(
+            Block::bordered()
+                .title(" Search ")
+                .border_style(Style::new().fg(Color::Yellow)),
+        ),
+        input,
+    );
+
+    let items: Vec<ListItem> = state
+        .hits
+        .iter()
+        .map(|hit| {
+            let path = hit.path();
+            let shown = path
+                .strip_prefix(&app.cwd)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            let spans = match hit {
+                crate::search::Hit::File { .. } => vec![
+                    Span::raw("📄 "),
+                    Span::styled(shown, Style::new().fg(ACCENT).bold()),
+                ],
+                crate::search::Hit::Line { line, text, .. } => vec![
+                    Span::raw("   "),
+                    Span::styled(shown, Style::new().fg(Color::White)),
+                    Span::styled(format!(":{line}  "), Style::new().dark_gray()),
+                    Span::styled(text.trim().to_string(), Style::new().dark_gray()),
+                ],
+            };
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let title = format!(" {} results ", state.hits.len());
+    let list_widget = List::new(items)
+        .block(
+            Block::bordered()
+                .title(title)
+                .title(
+                    Line::from(" ↑↓ move  Enter jump  Esc cancel ")
+                        .right_aligned()
+                        .dark_gray(),
+                )
+                .border_style(Style::new().fg(ACCENT)),
+        )
+        .highlight_style(
+            Style::new()
+                .bg(Color::Indexed(238))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut list_state = ListState::default();
+    if !state.hits.is_empty() {
+        list_state.select(Some(state.selected));
+    }
+    frame.render_stateful_widget(list_widget, list, &mut list_state);
+
+    frame.set_cursor_position((input.x + 1 + state.query.chars().count() as u16, input.y + 1));
 }
 
 /// A centered rectangle of the given width/height (in cells) within `area`.

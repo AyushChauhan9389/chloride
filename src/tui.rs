@@ -6,13 +6,17 @@ use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
 };
 
-use crate::app::{App, AuthForm, AuthKind, InputKind, Mode, View};
+use crate::app::{App, AuthForm, AuthKind, InputKind, Mode, SearchState, View};
+use std::time::Duration;
 use crate::{api, ui};
 
 /// Set up the terminal, run the event loop, and restore on exit.
-pub fn launch(auth: Option<AuthKind>) -> Result<()> {
+pub fn launch(auth: Option<AuthKind>, view: Option<View>) -> Result<()> {
     let terminal = ratatui::init();
     let mut app = App::new();
+    if let Some(view) = view {
+        app.switch_view(view);
+    }
     if let Some(kind) = auth {
         app.mode = Mode::Auth(AuthForm::new(kind));
     }
@@ -21,10 +25,20 @@ pub fn launch(auth: Option<AuthKind>) -> Result<()> {
     result
 }
 
+/// Redraw cadence while a search is streaming results in. Without this the
+/// loop would block in `event::read` and never repaint until the next
+/// keystroke, so results would appear only when the user typed.
+const TICK: Duration = Duration::from_millis(50);
+
 fn run(mut terminal: DefaultTerminal, mut app: App) -> Result<()> {
     while app.running {
+        app.drain_search();
         terminal.draw(|frame| ui::render(frame, &app))?;
 
+        // Poll rather than block, so streaming results still get drawn.
+        if !event::poll(TICK)? {
+            continue;
+        }
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
@@ -50,6 +64,7 @@ fn on_key(app: &mut App, key: KeyEvent) {
         Mode::Quota(_) => {
             // Any key dismisses the quota overlay.
         }
+        Mode::Search => on_search_key(app, key.code),
     }
 }
 
@@ -117,6 +132,10 @@ fn on_browse_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('S') => {
             app.mode = Mode::Auth(AuthForm::new(AuthKind::Register));
         }
+        KeyCode::Char('/') => {
+            app.search = Some(SearchState::new());
+            app.mode = Mode::Search;
+        }
         KeyCode::Char('u') => {
             match api::get_storage(&mut app.config) {
                 Ok(info) => app.mode = Mode::Quota(Some(Ok(info))),
@@ -125,6 +144,64 @@ fn on_browse_key(app: &mut App, code: KeyCode) {
         }
         _ => {}
     }
+}
+
+fn on_search_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => {
+            // Dropping the state cancels the running walk.
+            app.search = None;
+            return;
+        }
+        KeyCode::Enter => {
+            // Jump the file manager to the selected hit's directory and land
+            // the cursor on it.
+            if let Some(state) = &app.search
+                && let Some(hit) = state.hits.get(state.selected)
+            {
+                let path = hit.path().to_path_buf();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Some(parent) = path.parent() {
+                    app.cwd = parent.to_path_buf();
+                }
+                app.search = None;
+                app.view = View::FileManager;
+                app.refresh();
+                app.select_by_name(&name);
+                app.set_info(format!("jumped to '{name}'"));
+            } else {
+                app.search = None;
+            }
+            return;
+        }
+        KeyCode::Down => {
+            if let Some(state) = app.search.as_mut() {
+                state.selected = (state.selected + 1).min(state.hits.len().saturating_sub(1));
+            }
+        }
+        KeyCode::Up => {
+            if let Some(state) = app.search.as_mut() {
+                state.selected = state.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(state) = app.search.as_mut() {
+                state.query.pop();
+            }
+            app.restart_search();
+        }
+        KeyCode::Char(c) => {
+            if let Some(state) = app.search.as_mut() {
+                state.query.push(c);
+            }
+            app.restart_search();
+        }
+        _ => {}
+    }
+    app.mode = Mode::Search;
 }
 
 fn on_input_key(app: &mut App, code: KeyCode, kind: InputKind, mut buffer: String) {
