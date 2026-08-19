@@ -429,25 +429,20 @@ fn edit(row: &Row) -> Result<()> {
     Ok(())
 }
 
-/// Emoji for a file, by extension. Purely decorative, but it makes a long list
-/// scannable by shape before you read a single word.
-fn icon(path: &Path) -> &'static str {
-    match path
+/// Three-column extension tag, e.g. `rs `, `yml`, `png`. Plain ASCII on
+/// purpose: emoji icons render as blanks or tofu wherever the terminal font
+/// lacks them, and terminals disagree about emoji width, which breaks the
+/// fixed-width block. The extension is what made the list scannable anyway.
+fn tag(path: &Path) -> String {
+    let ext: String = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
-        .to_lowercase()
-        .as_str()
-    {
-        "rs" => "🦀",
-        "ts" | "tsx" | "js" | "jsx" | "mjs" => "📜",
-        "json" | "toml" | "yaml" | "yml" | "lock" => "⚙️ ",
-        "md" | "txt" => "📄",
-        "sh" | "bash" | "ps1" | "nsi" => "🐚",
-        "png" | "jpg" | "jpeg" | "gif" | "svg" => "🖼️ ",
-        "zip" | "gz" | "tar" | "apk" => "📦",
-        _ => "•",
-    }
+        .chars()
+        .take(3)
+        .collect::<String>()
+        .to_lowercase();
+    format!("{ext:<3}")
 }
 
 /// Paint the matched term inside a line so the eye lands on it. Literal and
@@ -542,7 +537,7 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
                 } else {
                     format!("{}", rel.display())
                 };
-                let head = format!(" {rail} {} {name}", icon(path));
+                let head = format!(" {rail} {DIM}{}{RESET} {name}", tag(path));
                 let chip = format!(
                     "{DIM}{} · {}{RESET}",
                     crate::app::human_size(row.size),
@@ -578,8 +573,8 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
                         .filter(|&&j| state.rows[j].hit.path() == path)
                         .count();
                     let head = format!(
-                        "  {} {DIM}{dir}{RESET}{ACCENT}{BOLD}{name}{RESET}",
-                        icon(path)
+                        "   {DIM}{} {dir}{RESET}{ACCENT}{BOLD}{name}{RESET}",
+                        tag(path)
                     );
                     let chip = format!(
                         "{DIM}{hits} · {}{RESET}",
@@ -886,6 +881,21 @@ mod tests {
         let rendered = render_at_width(&state, Path::new("."), 80).join("\n");
         let plain = crate::inline::strip_ansi(&rendered);
         assert_eq!(plain.matches("zipper.rs").count(), 1, "{plain}");
+    }
+
+    #[test]
+    fn tags_are_ascii_and_three_columns_wide() {
+        // Emoji icons rendered as tofu on terminals without an emoji font and
+        // have ambiguous width; tags must be plain ASCII and fixed-width so
+        // every row lines up everywhere.
+        for p in ["a.rs", "b.yaml", "c.png", "Makefile", "d.tar.gz"] {
+            let t = tag(Path::new(p));
+            assert!(t.is_ascii(), "{t:?}");
+            assert_eq!(t.chars().count(), 3, "{t:?}");
+        }
+        assert_eq!(tag(Path::new("a.rs")), "rs ");
+        assert_eq!(tag(Path::new("b.yaml")), "yam");
+        assert_eq!(tag(Path::new("Makefile")), "   ");
     }
 
     #[test]
