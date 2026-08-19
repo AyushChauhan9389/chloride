@@ -209,6 +209,34 @@ impl State {
         (0..files + content_shown).collect()
     }
 
+    /// Move the selection to the first hit belonging to the next (`forward`)
+    /// or previous distinct file. This skips every matching line in the
+    /// current file, so Ctrl+Down is useful even when one file has many hits.
+    fn move_file(&mut self, forward: bool) {
+        let visible = self.visible_rows();
+        let Some(&current) = visible.get(self.selected) else {
+            return;
+        };
+        let path = self.rows[current].hit.path();
+        let mut range: Box<dyn Iterator<Item = usize>> = if forward {
+            Box::new(self.selected.saturating_add(1)..visible.len())
+        } else {
+            Box::new((0..self.selected).rev())
+        };
+        if let Some(mut next) = range.find(|&slot| self.rows[visible[slot]].hit.path() != path) {
+            // A reverse search finds the previous file's final hit. Move to
+            // that file's first hit so either direction consistently selects
+            // the start of a file group.
+            while !forward
+                && next > 0
+                && self.rows[visible[next - 1]].hit.path() == self.rows[visible[next]].hit.path()
+            {
+                next -= 1;
+            }
+            self.selected = next;
+        }
+    }
+
     fn clamp(&mut self) {
         let len = self.visible_rows().len();
         if len == 0 {
@@ -336,6 +364,14 @@ fn drive(
                 state.user_moved = true;
                 state.selected = state.selected.saturating_sub(1);
             }
+            Action::NextFile => {
+                state.user_moved = true;
+                state.move_file(true);
+            }
+            Action::PreviousFile => {
+                state.user_moved = true;
+                state.move_file(false);
+            }
             Action::Expand => state.expanded = !state.expanded,
             Action::Preview => state.preview = !state.preview,
             Action::EditQuery => state.editing = true,
@@ -362,6 +398,8 @@ fn drive(
 enum Action {
     Up,
     Down,
+    PreviousFile,
+    NextFile,
     Select,
     Edit,
     Expand,
@@ -375,6 +413,8 @@ fn action(key: KeyEvent) -> Action {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => Action::Quit,
         (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) => Action::Quit,
+        (KeyCode::Down, KeyModifiers::CONTROL) => Action::NextFile,
+        (KeyCode::Up, KeyModifiers::CONTROL) => Action::PreviousFile,
         (KeyCode::Down, _) | (KeyCode::Char('j'), _) => Action::Down,
         (KeyCode::Up, _) | (KeyCode::Char('k'), _) => Action::Up,
         (KeyCode::Enter, _) => Action::Select,
@@ -691,6 +731,7 @@ fn render_at_width(state: &State, root: &Path, term: usize) -> Vec<String> {
         if state.content_count() > CONTENT_CAP {
             hints.push(key("⇥", if state.expanded { "fold" } else { "all" }));
         }
+        hints.push(key("^↑↓", "file"));
         hints.push(key("^p", "preview"));
         hints.push(key("esc", "quit"));
         format!("   {}", hints.join("   "))
@@ -884,6 +925,60 @@ mod tests {
         }
         let lines: Vec<u64> = s.rows.iter().map(|r| r.line()).collect();
         assert_eq!(lines, vec![1, 13, 79]);
+    }
+
+    #[test]
+    fn move_file_skips_all_hits_in_the_current_file() {
+        let mut s = State::new("q".into());
+        for (path, line) in [
+            ("a.rs", 1),
+            ("a.rs", 2),
+            ("a.rs", 3),
+            ("b.rs", 1),
+            ("b.rs", 2),
+            ("c.rs", 1),
+        ] {
+            s.insert(Hit::Line {
+                path: PathBuf::from(path),
+                line,
+                text: "x".into(),
+                context: false,
+            });
+        }
+
+        // Results are grouped by path, then line. From a.rs:2, Ctrl+Down
+        // lands on b.rs:1 rather than the next line in a.rs.
+        s.selected = 1;
+        s.move_file(true);
+        assert_eq!(s.rows[s.visible_rows()[s.selected]].hit.path(), Path::new("b.rs"));
+        assert_eq!(s.rows[s.visible_rows()[s.selected]].line(), 1);
+
+        // Ctrl+Up returns to the first preceding distinct file. The ends are
+        // intentionally sticky rather than wrapping around.
+        s.move_file(false);
+        assert_eq!(s.rows[s.visible_rows()[s.selected]].hit.path(), Path::new("a.rs"));
+        s.move_file(false);
+        assert_eq!(s.selected, 0);
+        s.selected = s.visible_rows().len() - 1;
+        s.move_file(true);
+        assert_eq!(s.selected, s.visible_rows().len() - 1);
+    }
+
+    #[test]
+    fn ctrl_arrows_are_file_navigation_actions() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert!(matches!(
+            action(KeyEvent::new(KeyCode::Down, ctrl)),
+            Action::NextFile
+        ));
+        assert!(matches!(
+            action(KeyEvent::new(KeyCode::Up, ctrl)),
+            Action::PreviousFile
+        ));
+        assert!(matches!(
+            action(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Action::Down
+        ));
     }
 
     #[test]
